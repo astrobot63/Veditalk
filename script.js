@@ -1,1037 +1,1357 @@
-const $ = id => document.getElementById(id);
+
+"use strict";
+
+// ==========================================
+// 1. CONFIGURATION
+// ==========================================
 
 const CONFIG = {
-  PAPEROFFICE_API_KEY: "po_pk_910557515_de081807349357782b45fb50b60c5e0c484a42e7a1b6410c",
-  API_BASE_URL: "https://api.paperoffice.ai/latest",
+  PAPER_API_URL: "https://api.paperoffice.ai/latest",
+
+  // PaperOffice publishable key.
+  // Never place a po_sk_ secret key in frontend code.
+  PAPER_API_KEY: "po_pk_910557515_de081807349357782b45fb50b60c5e0c484a42e7a1b6410c",
+
+  APPWRITE_ENDPOINT: "https://sgp.cloud.appwrite.io/v1",
+  APPWRITE_PROJECT_ID: "6ae9e1da00258a582138",
+
+  DATABASE_ID: "6ae9e3b600286db871f6",
+  CONVERSATIONS_TABLE_ID: "6ae9e3de002015ecb63f",
+  MESSAGES_TABLE_ID: "6ae9e702003a2568a818",
+
   MAX_FILE_SIZE: 25 * 1024 * 1024,
-  MAX_FILES: 5
+
+  POLL_INTERVAL: 5000,
+  MAX_POLL_ATTEMPTS: 60
 };
 
-const ui = {
-  sidebar: $("sidebar"), welcome: $("welcome"), messages: $("messages"), input: $("messageInput"),
-  send: $("sendButton"), fileInput: $("fileInput"), attachments: $("attachments"),
-  historySection: $("historySection"), historyList: $("historyList"), modal: $("modal"), toast: $("toast"),
-  feature: $("featureSelect"), toolOptions: $("toolOptions"), languageOptions: $("languageOptions"),
-  lookupOptions: $("lookupOptions"), currencyOptions: $("currencyOptions"), lookupInput: $("lookupInput")
-};
+
+// ==========================================
+// 2. APPLICATION STATE
+// ==========================================
 
 let currentUser = null;
-let chats = [];
-let activeChatId = null;
-let pendingFiles = [];
-let toastTimer;
-let sending = false;
+let currentConversationId = null;
 
-function id() {
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-function activeChat() { return chats.find(chat => chat.id === activeChatId) || null; }
+let currentMode = "generate";
+let selectedFile = null;
+
+let isProcessing = false;
+let pendingOtpUserId = null;
+
+let appwriteReady = false;
+
+let client = null;
+let account = null;
+let tablesDB = null;
+
+let guestMessages = [];
+
+
+// ==========================================
+// 3. DOM ELEMENTS
+// ==========================================
+
+const $ = id => document.getElementById(id);
+
+const messagesContainer = $("messages");
+const promptInput = $("promptInput");
+const sendButton = $("sendButton");
+
+const attachButton = $("attachButton");
+const fileInput = $("fileInput");
+const filePreview = $("filePreview");
+
+const themeButton = $("themeButton");
+
+const accountButton = $("accountButton");
+const accountStatus = $("accountStatus");
+const historyButton = $("historyButton");
+
+const authOverlay = $("authOverlay");
+const authChoice = $("authChoice");
+const authForm = $("authForm");
+
+const historyPanel = $("historyPanel");
+const historyList = $("historyList");
+
+const toastElement = $("toast");
+
+
+// ==========================================
+// 4. GENERAL HELPERS
+// ==========================================
 
 function showToast(message) {
-  ui.toast.textContent = message;
-  ui.toast.classList.add("show");
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => ui.toast.classList.remove("show"), 3000);
-}
-
-function openModal(title, description, note) {
-  $("modalTitle").textContent = title;
-  $("modalDescription").textContent = description;
-  $("modalNote").textContent = note || "";
-  ui.modal.hidden = false;
-}
-
-function closeModal() { ui.modal.hidden = true; }
-
-function createChat() {
-  const chat = { id: id(), title: "New conversation", messages: [], updatedAt: Date.now() };
-  chats.unshift(chat);
-  activeChatId = chat.id;
-  renderHistory();
-  renderMessages();
-  return chat;
-}
-
-function renderHistory() {
-  ui.historyList.replaceChildren();
-  ui.historySection.hidden = !currentUser;
-  if (!currentUser) return;
-
-  if (!chats.length) {
-    const empty = document.createElement("p");
-    empty.className = "empty-history";
-    empty.textContent = "No saved conversations yet.";
-    ui.historyList.append(empty);
+  if (!toastElement) {
+    console.log(message);
     return;
   }
 
-  chats.forEach(chat => {
-    const button = document.createElement("button");
-    button.className = "history-item";
-    button.textContent = chat.title;
-    button.classList.toggle("active", chat.id === activeChatId);
-    button.addEventListener("click", () => {
-      activeChatId = chat.id;
-      renderHistory();
-      renderMessages();
-      closeSidebar();
-    });
-    ui.historyList.append(button);
+  toastElement.textContent = message;
+  toastElement.classList.add("show");
+
+  clearTimeout(showToast.timeout);
+
+  showToast.timeout = setTimeout(() => {
+    toastElement.classList.remove("show");
+  }, 3500);
+}
+
+
+function escapeHTML(value) {
+  return String(value).replace(/[&<>"']/g, character => {
+    const entities = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#039;"
+    };
+
+    return entities[character];
   });
 }
 
-function downloadFile(filename, content, type = "text/plain;charset=utf-8") {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+function getErrorMessage(error) {
+  return error?.message || "Something went wrong. Please try again.";
 }
 
-function addText(parent, text) {
-  const paragraph = document.createElement("div");
-  paragraph.className = "message-text";
-  paragraph.textContent = text;
-  parent.append(paragraph);
-}
 
-function renderRichText(parent, content) {
-  const parts = content.split(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g);
+function setProcessing(value) {
+  isProcessing = value;
 
-  for (let i = 0; i < parts.length; i++) {
-    if (i % 3 === 0) {
-      if (parts[i]) addText(parent, parts[i]);
-    } else {
-      const wrapper = document.createElement("div");
-      wrapper.className = "code-block";
+  if (sendButton) {
+    sendButton.disabled = value;
 
-      const header = document.createElement("div");
-      header.className = "code-header";
+    const label = sendButton.querySelector("span");
 
-      const language = document.createElement("span");
-      language.textContent = parts[i] || "code";
+    if (label) {
+      label.textContent = value ? "..." : "↑";
+    }
 
-      const actions = document.createElement("div");
-      const codeText = parts[i + 1];
-
-      const copy = document.createElement("button");
-      copy.textContent = "Copy";
-      copy.addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(codeText);
-          copy.textContent = "Copied!";
-          setTimeout(() => copy.textContent = "Copy", 1500);
-        } catch {
-          showToast("Clipboard access was blocked.");
-        }
-      });
-
-      const download = document.createElement("button");
-      download.textContent = "Download";
-      download.addEventListener("click", () => downloadFile("veditalk-code.txt", codeText));
-
-      actions.append(copy, download);
-      header.append(language, actions);
-
-      const pre = document.createElement("pre");
-      const code = document.createElement("code");
-      code.textContent = codeText;
-      pre.append(code);
-
-      wrapper.append(header, pre);
-      parent.append(wrapper);
-      i++;
+    if (sendButton.firstChild?.nodeType === Node.TEXT_NODE) {
+      sendButton.firstChild.textContent = value
+        ? "Working "
+        : currentMode === "generate"
+          ? "Generate "
+          : "Analyze ";
     }
   }
 }
 
-function renderMessages() {
-  const chat = activeChat();
-  ui.messages.replaceChildren();
 
-  if (!chat || chat.messages.length === 0) {
-    ui.welcome.hidden = false;
-    ui.messages.classList.remove("visible");
-    return;
+// ==========================================
+// 5. APPWRITE INITIALIZATION
+// ==========================================
+
+function initializeAppwrite() {
+  if (!window.Appwrite) {
+    console.error("Appwrite SDK was not loaded.");
+    showToast("Appwrite SDK failed to load. Check your internet connection.");
+    return false;
   }
 
-  ui.welcome.hidden = true;
-  ui.messages.classList.add("visible");
+  try {
+    client = new Appwrite.Client();
 
-  chat.messages.forEach(message => {
-    const row = document.createElement("article");
-    row.className = `message ${message.role}`;
+    client
+      .setEndpoint(CONFIG.APPWRITE_ENDPOINT)
+      .setProject(CONFIG.APPWRITE_PROJECT_ID);
 
-    const avatar = document.createElement("div");
-    avatar.className = "message-avatar";
-    avatar.textContent = message.role === "assistant" ? "✦" : "Q";
+    account = new Appwrite.Account(client);
+    tablesDB = new Appwrite.TablesDB(client);
 
-    const content = document.createElement("div");
-    content.className = "message-content";
+    appwriteReady = true;
 
-    const name = document.createElement("p");
-    name.className = "message-name";
-    name.textContent = message.role === "assistant" ? "Veditalk" : "You";
-    content.append(name);
-
-    if (message.content) renderRichText(content, message.content);
-
-    if (message.media?.length) {
-      const gallery = document.createElement("div");
-      gallery.className = "message-gallery";
-
-      message.media.forEach(item => {
-        if (item.type?.startsWith("image/") && item.url) {
-          const img = document.createElement("img");
-          img.src = item.url;
-          img.alt = item.name || "Generated image";
-          gallery.append(img);
-        } else if (item.type?.startsWith("audio/") && item.url) {
-          const audio = document.createElement("audio");
-          audio.controls = true;
-          audio.src = item.url;
-          gallery.append(audio);
-        } else if (item.url) {
-          const link = document.createElement("a");
-          link.href = item.url;
-          link.target = "_blank";
-          link.rel = "noopener noreferrer";
-          link.textContent = item.name || "Open result";
-          gallery.append(link);
-        }
-      });
-
-      content.append(gallery);
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "message-actions";
-
-    if (message.role === "assistant" && message.content) {
-      const download = document.createElement("button");
-      download.className = "message-action";
-      download.textContent = "↓ Download reply";
-      download.addEventListener("click", () => downloadFile("veditalk-reply.txt", message.content));
-      actions.append(download);
-    }
-
-    if (actions.children.length) content.append(actions);
-    row.append(avatar, content);
-    ui.messages.append(row);
-  });
-
-  ui.messages.scrollTop = ui.messages.scrollHeight;
+    return true;
+  } catch (error) {
+    console.error("Appwrite initialization error:", error);
+    showToast("Appwrite could not initialize.");
+    return false;
+  }
 }
 
-function addMessage(role, content, media = []) {
-  let chat = activeChat();
-  if (!chat) chat = createChat();
 
-  const message = { id: id(), role, content, media, createdAt: Date.now() };
-  chat.messages.push(message);
-  chat.updatedAt = Date.now();
+// ==========================================
+// 6. PAPER OFFICE API
+// ==========================================
 
-  if (role === "user" && chat.title === "New conversation") {
-    const title = content || "File request";
-    chat.title = title.length > 35 ? `${title.slice(0, 35)}…` : title;
+function getPaperApiKey() {
+  const key = CONFIG.PAPER_API_KEY.trim();
+
+  if (!key || key.includes("PASTE_YOUR_KEY")) {
+    throw new Error("Add your PaperOffice publishable key in script.js.");
   }
 
-  renderMessages();
-  renderHistory();
-  return message;
-}
-
-function renderAttachments() {
-  ui.attachments.replaceChildren();
-  ui.attachments.hidden = pendingFiles.length === 0;
-
-  pendingFiles.forEach((item, index) => {
-    const card = document.createElement("div");
-    card.className = "attachment";
-
-    if (item.type.startsWith("image/")) {
-      const img = document.createElement("img");
-      img.src = item.preview;
-      img.alt = item.name;
-      card.append(img);
-    }
-
-    const name = document.createElement("span");
-    name.textContent = item.name;
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.textContent = "×";
-
-    remove.addEventListener("click", () => {
-      if (item.preview) URL.revokeObjectURL(item.preview);
-      pendingFiles.splice(index, 1);
-      renderAttachments();
-      updateSendButton();
-    });
-
-    card.append(name, remove);
-    ui.attachments.append(card);
-  });
-}
-
-function selectFiles(files) {
-  for (const file of Array.from(files)) {
-    if (pendingFiles.length >= CONFIG.MAX_FILES) {
-      showToast(`Maximum ${CONFIG.MAX_FILES} files per request.`);
-      break;
-    }
-
-    if (file.size > CONFIG.MAX_FILE_SIZE) {
-      showToast(`${file.name} is larger than 25 MB.`);
-      continue;
-    }
-
-    const allowed =
-      file.type.startsWith("image/") ||
-      file.type.startsWith("audio/") ||
-      file.type === "application/pdf" ||
-      /\.docx?$/i.test(file.name);
-
-    if (!allowed) {
-      showToast(`${file.name}: unsupported file type.`);
-      continue;
-    }
-
-    pendingFiles.push({
-      file,
-      name: file.name,
-      type: file.type || "application/octet-stream",
-      preview: file.type.startsWith("image/")
-        ? URL.createObjectURL(file)
-        : ""
-    });
-  }
-
-  renderAttachments();
-  updateSendButton();
-}
-
-function getApiKey() {
-  const key = CONFIG.PAPEROFFICE_API_KEY.trim();
-
-  if (!key || key.includes("PASTE_YOUR")) {
-    throw new Error("Add your PaperOffice Publishable Key in CONFIG at the top of script.js.");
+  if (key.startsWith("po_sk_")) {
+    throw new Error(
+      "Secret PaperOffice keys must not be used in frontend code."
+    );
   }
 
   if (!key.startsWith("po_pk_")) {
-    throw new Error("Use a PaperOffice Publishable Key beginning with po_pk_. Never put a secret key in this file.");
+    throw new Error("Invalid PaperOffice publishable key format.");
   }
 
   return key;
 }
 
-async function apiRequest(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  headers.set("Authorization", `Bearer ${getApiKey()}`);
 
-  const response = await fetch(`${CONFIG.API_BASE_URL}${path}`, {
-    ...options,
-    headers
-  });
+async function paperRequest(endpoint, options = {}) {
+  const apiKey = getPaperApiKey();
 
-  const contentType = response.headers.get("content-type") || "";
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    ...options.headers
+  };
 
-  const data = contentType.includes("application/json")
-    ? await response.json()
-    : await response.text();
+  if (!(options.body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const response = await fetch(
+    `${CONFIG.PAPER_API_URL}${endpoint}`,
+    {
+      ...options,
+      headers
+    }
+  );
+
+  const result = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    const detail = typeof data === "string"
-      ? data
-      : data.message || data.error || data.code || JSON.stringify(data);
-
-    throw new Error(`PaperOffice error ${response.status}: ${detail}`);
+    throw new Error(
+      result.message ||
+      result.error ||
+      `PaperOffice error: HTTP ${response.status}`
+    );
   }
 
-  return data;
+  return result;
 }
 
-function formData(fields, fileField, file) {
-  const body = new FormData();
 
-  Object.entries(fields).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== "") {
-      body.append(key, String(value));
-    }
-  });
-
-  if (file && fileField) {
-    body.append(fileField, file, file.name);
-  }
-
-  return body;
+function getJobId(result) {
+  return (
+    result?.job_id ||
+    result?.jobId ||
+    result?.data?.job_id ||
+    result?.data?.jobId ||
+    result?.id ||
+    result?.data?.id ||
+    null
+  );
 }
 
-function extractReadable(value, depth = 0) {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
 
-  if (depth > 5) return JSON.stringify(value);
+async function pollPaperJob(jobId) {
+  for (
+    let attempt = 0;
+    attempt < CONFIG.MAX_POLL_ATTEMPTS;
+    attempt++
+  ) {
+    await new Promise(resolve => {
+      setTimeout(resolve, CONFIG.POLL_INTERVAL);
+    });
 
-  if (Array.isArray(value)) {
-    return value
-      .map(item => extractReadable(item, depth + 1))
-      .filter(Boolean)
-      .join("\n");
-  }
-
-  if (typeof value === "object") {
-    const preferred = [
-      "text",
-      "extracted_text",
-      "ocr_text",
-      "transcription",
-      "transcript",
-      "translation",
-      "summary",
-      "content",
-      "message",
-      "description",
-      "result"
-    ];
-
-    const parts = [];
-
-    for (const key of preferred) {
-      if (value[key] !== undefined) {
-        const text = extractReadable(value[key], depth + 1);
-
-        if (text && !parts.includes(text)) {
-          parts.push(text);
-        }
-      }
-    }
-
-    if (parts.length) return parts.join("\n\n");
-
-    return JSON.stringify(value, null, 2);
-  }
-
-  return String(value);
-}
-
-async function pollJob(jobId) {
-  for (let attempt = 0; attempt < 60; attempt++) {
-    await new Promise(resolve => setTimeout(resolve, 5000));
-
-    const result = await apiRequest(
-      `/job/get/${encodeURIComponent(jobId)}?compact=false`
+    const result = await paperRequest(
+      `/job/status/${encodeURIComponent(jobId)}`
     );
 
-    if (result.job_status === "completed") {
-      return result.result ?? result.job_result ?? result;
+    const status = String(
+      result.status ||
+      result.data?.status ||
+      ""
+    ).toLowerCase();
+
+    if (
+      ["completed", "complete", "success", "succeeded"].includes(status)
+    ) {
+      return result;
     }
 
-    if (result.job_status === "failed") {
+    if (
+      ["failed", "error", "cancelled"].includes(status)
+    ) {
       throw new Error(
-        result.message || result.error || "PaperOffice job failed."
+        result.message ||
+        result.error ||
+        "The PaperOffice job failed."
       );
     }
   }
 
-  throw new Error(`This job is taking longer than expected. Job ID: ${jobId}`);
+  throw new Error("The request timed out. Please try again.");
 }
 
-async function submitJob(pipeline, body) {
-  const response = await apiRequest(`/job/add/${pipeline}`, {
-    method: "POST",
-    body
-  });
 
-  if (response.job_status === "completed") {
-    return response.result ?? response.job_result ?? response;
+// ==========================================
+// 7. RESPONSE EXTRACTION
+// ==========================================
+
+function extractText(value) {
+  if (typeof value === "string") {
+    return value;
   }
 
-  if (response.job_id) {
-    return pollJob(response.job_id);
+  if (Array.isArray(value)) {
+    return value.map(extractText).filter(Boolean).join("\n");
   }
 
-  if (
-    response.result !== undefined ||
-    response.job_result !== undefined
-  ) {
-    return response.result ?? response.job_result;
+  if (!value || typeof value !== "object") {
+    return "";
   }
 
-  return response;
+  const fields = [
+    "text",
+    "content",
+    "result",
+    "output",
+    "transcription",
+    "extracted_text",
+    "markdown"
+  ];
+
+  for (const field of fields) {
+    if (typeof value[field] === "string") {
+      return value[field];
+    }
+  }
+
+  for (const field of ["data", "results"]) {
+    if (value[field]) {
+      const extracted = extractText(value[field]);
+
+      if (extracted) return extracted;
+    }
+  }
+
+  return "";
 }
 
-function getFirstFile(typePrefix) {
-  return pendingFiles.find(item => item.type.startsWith(typePrefix))?.file || null;
-}
 
-function requireFile(typePrefix, label) {
-  const file = getFirstFile(typePrefix);
-
-  if (!file) {
-    throw new Error(`Attach a ${label} file first.`);
-  }
-
-  return file;
-}
-
-async function runOCR(file, handwriting = false) {
-  const fields = handwriting
-    ? {
-        model: "ultra",
-        idp_collection: "handwritten_document",
-        processing_lane: "no_sla"
-      }
-    : {
-        ocr_mode: "text",
-        output_searchable_pdf: "false",
-        processing_lane: "no_sla"
-      };
-
-  return submitJob(
-    "paperoffice_aiocr___generate",
-    formData(fields, "file_1", file)
-  );
-}
-
-async function runDocumentAnalysis(file, collection = "document_analysis", fields = null) {
-  const options = {
-    model: "premium",
-    idp_collection: collection,
-    processing_lane: "no_sla"
-  };
-
-  if (fields) {
-    options.idp_fields = JSON.stringify(fields);
-  }
-
-  return apiRequest("/documents/document-analysis", {
-    method: "POST",
-    body: formData(options, "file_1", file)
-  });
-}
-
-function getDocumentFile() {
-  return pendingFiles.find(item =>
-    item.type.startsWith("image/") ||
-    item.type === "application/pdf" ||
-    item.name.toLowerCase().endsWith(".pdf")
-  )?.file || null;
-}
-
-async function runFeature(feature, prompt) {
-  const file = getDocumentFile();
-
-  if (feature === "chat") {
-    throw new Error(
-      "PaperOffice's current public API documentation does not provide a general chat-completions endpoint. The llm:generate permission is a scope, not an endpoint. I have not invented a URL."
-    );
-  }
-
-  if (feature === "ocr") {
-    if (!file) throw new Error("Attach an image or PDF first.");
-    return runOCR(file, false);
-  }
-
-  if (feature === "handwriting") {
-    if (!file) {
-      throw new Error("Attach a scan or photo of the handwritten page first.");
-    }
-
-    return runOCR(file, true);
-  }
-
-  if (feature === "summarize") {
-    if (!file) {
-      throw new Error("Attach a PDF or image document to summarize.");
-    }
-
-    return runDocumentAnalysis(file);
-  }
-
-  if (feature === "image-analyze") {
-    return runDocumentAnalysis(
-      requireFile("image/", "image"),
-      "document_analysis"
-    );
-  }
-
-  if (feature === "extract") {
-    if (!file) {
-      throw new Error("Attach a document or image first.");
-    }
-
-    return runDocumentAnalysis(file, "document_analysis", [
-      {
-        key: "person_names",
-        description: "Names of people mentioned in the document"
-      },
-      {
-        key: "organization_names",
-        description: "Names of companies and organizations"
-      },
-      {
-        key: "dates",
-        description: "Dates mentioned in the document"
-      },
-      {
-        key: "addresses",
-        description: "Postal and street addresses"
-      },
-      {
-        key: "email_addresses",
-        description: "Email addresses"
-      },
-      {
-        key: "phone_numbers",
-        description: "Phone numbers"
-      }
-    ]);
-  }
-
-  if (feature === "translate") {
-    if (!prompt) {
-      throw new Error("Enter the text you want to translate.");
-    }
-
-    return apiRequest("/translate/text", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        text: prompt,
-        source_language: "auto",
-        target_language: $("targetLanguage").value,
-        tier: "premium",
-        client_wait: true
-      })
-    });
-  }
-
-  if (feature === "tts") {
-    if (!prompt) {
-      throw new Error("Enter the text you want Veditalk to read aloud.");
-    }
-
-    return submitJob(
-      "paperoffice_voice___tts",
-      formData({
-        text: prompt,
-        voice: "Abigail",
-        language: "en",
-        quality: "premium",
-        output_format: "mp3",
-        output: "url",
-        processing_lane: "no_sla"
-      })
-    );
-  }
-
-  if (feature === "stt") {
-    const audio = requireFile("audio/", "audio");
-
-    return submitJob(
-      "paperoffice_voice___stt",
-      formData({
-        quality: "basic",
-        output_format: "json",
-        processing_lane: "no_sla"
-      }, "audio_file", audio)
-    );
-  }
-
-  if (feature === "image-gen") {
-    if (!prompt) {
-      throw new Error("Describe the image you want to generate.");
-    }
-
-    return submitJob(
-      "paperoffice_imagestudio___generate",
-      formData({
-        prompt,
-        model: "premium",
-        output: "url",
-        num_images: 1,
-        precompile_prompt: "true",
-        inject_weather: "false",
-        processing_lane: "no_sla"
-      })
-    );
-  }
-
-  if (feature === "currency") {
-    const amount = Number($("currencyAmount").value);
-
-    if (!Number.isFinite(amount) || amount < 0) {
-      throw new Error("Enter a valid amount.");
-    }
-
-    return apiRequest("/currency_exchange/convert", {
-      method: "POST",
-      body: formData({
-        from: $("currencyFrom").value,
-        to: $("currencyTo").value,
-        amount
-      })
-    });
-  }
-
-  if (feature === "weather") {
-    const city = ui.lookupInput.value.trim();
-
-    if (!city) throw new Error("Enter a city name.");
-
-    return apiRequest(
-      `/weather?city=${encodeURIComponent(city)}&lang=en`
-    );
-  }
-
-  if (feature === "address") {
-    const address = ui.lookupInput.value.trim();
-
-    if (!address) {
-      throw new Error("Enter an address or place name.");
-    }
-
-    return apiRequest("/geocoding/forward", {
-      method: "POST",
-      body: formData({
-        address,
-        lang: "en"
-      })
-    });
-  }
-
-  if (feature === "sentiment") {
-    throw new Error(
-      "The documented sentiment endpoint reads CRM account sentiment history. It does not analyze arbitrary text, and this app's key intentionally has no account-data access."
-    );
-  }
-
-  if (feature === "demo") {
-    const response = await fetch(`${CONFIG.API_BASE_URL}/health`);
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.message || "PaperOffice health check failed.");
-    }
-
-    return data;
-  }
-
-  throw new Error("This tool is not connected yet.");
-}
-
-function findUrls(value, output = [], depth = 0) {
-  if (!value || depth > 6) return output;
+function extractImageUrls(value) {
+  if (!value) return [];
 
   if (typeof value === "string") {
-    output.push(...(value.match(/https?:\/\/[^\s"'<>]+/g) || []));
-  } else if (Array.isArray(value)) {
-    value.forEach(item => findUrls(item, output, depth + 1));
-  } else if (typeof value === "object") {
-    Object.values(value).forEach(item => findUrls(item, output, depth + 1));
+    if (/^https?:\/\//i.test(value)) {
+      return [value];
+    }
+
+    return [];
   }
 
-  return output;
+  if (Array.isArray(value)) {
+    return value.flatMap(extractImageUrls);
+  }
+
+  if (typeof value !== "object") {
+    return [];
+  }
+
+  const urls = [];
+
+  for (const field of [
+    "url",
+    "image_url",
+    "imageUrl",
+    "output_url",
+    "download_url"
+  ]) {
+    if (typeof value[field] === "string") {
+      urls.push(value[field]);
+    }
+  }
+
+  for (const field of [
+    "data",
+    "result",
+    "results",
+    "output",
+    "images"
+  ]) {
+    if (value[field]) {
+      urls.push(...extractImageUrls(value[field]));
+    }
+  }
+
+  return [...new Set(urls)];
 }
 
-function formatFeatureResult(feature, result) {
-  const text = extractReadable(result);
-  const urls = findUrls(result);
-  const media = [];
 
-  const downloadUrl = urls.find(url =>
-    url.includes("/job/download/")
-  );
+// ==========================================
+// 8. CHAT MESSAGES
+// ==========================================
 
-  if (downloadUrl) {
-    media.push({
-      name: feature === "image-gen" ? "Generated image" : "Open result file",
-      url: downloadUrl,
-      type: feature === "image-gen" ? "image/*" : "application/octet-stream"
-    });
-  }
+function scrollToBottom() {
+  window.scrollTo({
+    top: document.body.scrollHeight,
+    behavior: "smooth"
+  });
+}
 
-  const audioUrl = result?.audio_url || result?.url || result?.download_url;
 
-  if (
-    feature === "tts" &&
-    typeof audioUrl === "string" &&
-    audioUrl.startsWith("http")
-  ) {
-    media.push({
-      name: "Generated speech",
-      url: audioUrl,
-      type: "audio/mpeg"
-    });
-  }
+function clearMessages() {
+  messagesContainer.innerHTML = "";
+}
 
-  if (
-    feature === "image-gen" &&
-    !media.length &&
-    typeof audioUrl === "string" &&
-    audioUrl.startsWith("http")
-  ) {
-    media.push({
-      name: "Generated image",
-      url: audioUrl,
-      type: "image/*"
-    });
-  }
 
-  return {
-    text: text || JSON.stringify(result, null, 2),
-    media
+function addMessage(role, content) {
+  const wrapper = document.createElement("div");
+  wrapper.className = `message ${role}`;
+
+  const label = document.createElement("div");
+  label.className = "message-label";
+  label.textContent = role === "user" ? "You" : "Veditalk";
+
+  const messageContent = document.createElement("div");
+  messageContent.className = "message-content";
+  messageContent.textContent = content;
+
+  wrapper.append(label, messageContent);
+
+  messagesContainer.appendChild(wrapper);
+
+  scrollToBottom();
+
+  return wrapper;
+}
+
+
+function addImageMessage(url) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "message assistant";
+
+  const label = document.createElement("div");
+  label.className = "message-label";
+  label.textContent = "Veditalk";
+
+  const image = document.createElement("img");
+
+  image.className = "message-image";
+  image.src = url;
+  image.alt = "Generated image";
+  image.loading = "lazy";
+
+  image.onerror = () => {
+    image.alt = "The generated image could not be loaded.";
   };
+
+  wrapper.append(label, image);
+
+  messagesContainer.appendChild(wrapper);
+
+  scrollToBottom();
+
+  return wrapper;
 }
 
-async function sendMessage() {
-  if (sending) return;
 
-  const prompt = ui.input.value.trim();
-  const feature = ui.feature.value;
-  const noTextNeeded = ["currency", "weather", "address", "demo"].includes(feature);
+// ==========================================
+// 9. APPWRITE ROW PERMISSIONS
+// ==========================================
 
-  if (!prompt && pendingFiles.length === 0 && !noTextNeeded) return;
+function getRowPermissions(userId) {
+  return [
+    Appwrite.Permission.read(Appwrite.Role.user(userId)),
+    Appwrite.Permission.update(Appwrite.Role.user(userId)),
+    Appwrite.Permission.delete(Appwrite.Role.user(userId))
+  ];
+}
 
-  sending = true;
-  updateSendButton();
 
-  const fileNames = pendingFiles.map(item => item.name);
+// ==========================================
+// 10. CONVERSATION STORAGE
+// ==========================================
 
-  addMessage(
-    "user",
-    [
-      prompt,
-      fileNames.length ? `Attached: ${fileNames.join(", ")}` : ""
-    ].filter(Boolean).join("\n")
-  );
+async function createConversation(firstMessage) {
+  if (!currentUser || !appwriteReady) return null;
 
-  ui.input.value = "";
-  ui.input.style.height = "auto";
+  const now = new Date().toISOString();
 
-  const loading = addMessage("assistant", "Working with PaperOffice…");
+  const conversation = await tablesDB.createRow({
+    databaseId: CONFIG.DATABASE_ID,
+    tableId: CONFIG.CONVERSATIONS_TABLE_ID,
+    rowId: Appwrite.ID.unique(),
+
+    data: {
+      userId: currentUser.$id,
+      title: firstMessage.slice(0, 70) || "New conversation",
+      createdAt: now,
+      updatedAt: now
+    },
+
+    permissions: getRowPermissions(currentUser.$id)
+  });
+
+  currentConversationId = conversation.$id;
+
+  return conversation;
+}
+
+
+async function saveMessage(role, content, attachments = []) {
+  if (!currentUser) {
+    guestMessages.push({
+      role,
+      content,
+      attachments,
+      createdAt: new Date().toISOString()
+    });
+
+    return;
+  }
+
+  if (!currentConversationId) {
+    await createConversation(
+      role === "user" ? content : "New conversation"
+    );
+  }
+
+  const now = new Date().toISOString();
+
+  await tablesDB.createRow({
+    databaseId: CONFIG.DATABASE_ID,
+    tableId: CONFIG.MESSAGES_TABLE_ID,
+    rowId: Appwrite.ID.unique(),
+
+    data: {
+      conversationId: currentConversationId,
+      userId: currentUser.$id,
+      role,
+      content: String(content).slice(0, 10000),
+      createdAt: now,
+      attachments: JSON.stringify(attachments).slice(0, 10000)
+    },
+
+    permissions: getRowPermissions(currentUser.$id)
+  });
+
+  await tablesDB.updateRow({
+    databaseId: CONFIG.DATABASE_ID,
+    tableId: CONFIG.CONVERSATIONS_TABLE_ID,
+    rowId: currentConversationId,
+
+    data: {
+      updatedAt: now
+    }
+  });
+}
+
+
+// ==========================================
+// 11. LOAD CONVERSATIONS
+// ==========================================
+
+async function loadHistory() {
+  if (!currentUser || !appwriteReady) return;
+
+  historyList.innerHTML = "<p>Loading conversations...</p>";
+  historyPanel.classList.remove("hidden");
 
   try {
-    const result = await runFeature(feature, prompt);
-    const formatted = formatFeatureResult(feature, result);
+    const response = await tablesDB.listRows({
+      databaseId: CONFIG.DATABASE_ID,
+      tableId: CONFIG.CONVERSATIONS_TABLE_ID,
 
-    loading.content = formatted.text;
-    loading.media = formatted.media;
-
-    renderMessages();
-  } catch (error) {
-    loading.content = `Couldn't complete that request.\n\n${error.message}`;
-    renderMessages();
-  } finally {
-    pendingFiles.forEach(item => {
-      if (item.preview) URL.revokeObjectURL(item.preview);
+      queries: [
+        Appwrite.Query.equal("userId", currentUser.$id),
+        Appwrite.Query.orderDesc("updatedAt"),
+        Appwrite.Query.limit(50)
+      ]
     });
 
-    pendingFiles = [];
-    renderAttachments();
-    sending = false;
-    updateSendButton();
-    ui.input.focus();
+    historyList.innerHTML = "";
+
+    if (!response.rows.length) {
+      historyList.textContent = "No saved conversations yet.";
+      return;
+    }
+
+    for (const conversation of response.rows) {
+      const button = document.createElement("button");
+
+      button.className = "history-item";
+      button.textContent = conversation.title || "Untitled conversation";
+
+      button.addEventListener("click", async () => {
+        await loadConversation(conversation.$id);
+      });
+
+      historyList.appendChild(button);
+    }
+  } catch (error) {
+    console.error("History loading error:", error);
+
+    historyList.textContent = "Unable to load conversations.";
+    showToast(getErrorMessage(error));
   }
 }
 
-function updateSendButton() {
-  const noTextNeeded = ["currency", "weather", "address", "demo"].includes(ui.feature.value);
 
-  ui.send.disabled =
-    sending ||
-    (!ui.input.value.trim() && pendingFiles.length === 0 && !noTextNeeded);
-}
-
-function updateFeatureOptions() {
-  const feature = ui.feature.value;
-
-  ui.toolOptions.hidden =
-    !["translate", "weather", "address", "currency"].includes(feature);
-
-  ui.languageOptions.hidden = feature !== "translate";
-  ui.lookupOptions.hidden = !["weather", "address"].includes(feature);
-  ui.currencyOptions.hidden = feature !== "currency";
-
-  if (feature === "weather") {
-    $("lookupLabel").textContent = "CITY";
-    ui.lookupInput.placeholder = "e.g. Kuala Lumpur";
-  }
-
-  if (feature === "address") {
-    $("lookupLabel").textContent = "ADDRESS OR PLACE";
-    ui.lookupInput.placeholder = "Enter an address or place";
-  }
-
-  const placeholders = {
-    chat: "Chat endpoint is not documented yet...",
-    ocr: "Attach an image or PDF to read...",
-    translate: "Enter text to translate...",
-    summarize: "Attach a document to summarize...",
-    "image-analyze": "Attach an image to analyze...",
-    handwriting: "Attach a handwritten page...",
-    sentiment: "Sentiment analysis is not available for arbitrary text yet...",
-    extract: "Attach a document to extract text from...",
-    tts: "Enter text for Veditalk to read aloud...",
-    stt: "Attach an audio file to transcribe...",
-    "image-gen": "Describe the image you want to create...",
-    currency: "Set the amount and currencies above.",
-    weather: "Set the city above.",
-    address: "Set the address above.",
-    demo: "Run a PaperOffice API connection check."
-  };
-
-  ui.input.placeholder = placeholders[feature] || "Enter your request...";
-  updateSendButton();
-}
-
-function resizeInput() {
-  ui.input.style.height = "auto";
-  ui.input.style.height = `${Math.min(ui.input.scrollHeight, 150)}px`;
-}
-
-function setAuthenticatedUser(user, savedChats = []) {
-  currentUser = user || null;
-  chats = currentUser && Array.isArray(savedChats) ? savedChats : [];
-  activeChatId = null;
-
-  $("accountName").textContent = currentUser?.name || "Guest";
-  $("accountStatus").textContent = currentUser?.email || "Not signed in";
-  $("accountAvatar").textContent =
-    currentUser?.name?.charAt(0)?.toUpperCase() || "G";
-
-  renderHistory();
-  renderMessages();
-}
-
-function newChat() {
-  activeChatId = null;
-
-  pendingFiles.forEach(item => {
-    if (item.preview) URL.revokeObjectURL(item.preview);
-  });
-
-  pendingFiles = [];
-  renderAttachments();
-  renderMessages();
-
-  ui.input.value = "";
-  resizeInput();
-  updateSendButton();
-  ui.input.focus();
-}
-
-function closeSidebar() {
-  ui.sidebar.classList.remove("open");
-}
-
-$("newChat").addEventListener("click", newChat);
-ui.send.addEventListener("click", sendMessage);
-
-ui.input.addEventListener("input", () => {
-  resizeInput();
-  updateSendButton();
-});
-
-ui.input.addEventListener("keydown", event => {
-  if (event.key === "Enter" && !event.shiftKey) {
-    event.preventDefault();
-    sendMessage();
-  }
-});
-
-$("attachButton").addEventListener("click", () => ui.fileInput.click());
-
-ui.fileInput.addEventListener("change", event => {
-  selectFiles(event.target.files);
-  event.target.value = "";
-});
-
-ui.feature.addEventListener("change", updateFeatureOptions);
-
-document.querySelectorAll(".suggestion").forEach(button => {
-  button.addEventListener("click", () => {
-    ui.feature.value = button.dataset.feature || "chat";
-    updateFeatureOptions();
-
-    ui.input.value = button.dataset.prompt || "";
-    resizeInput();
-    updateSendButton();
-    ui.input.focus();
-  });
-});
-
-$("upgradeButton").addEventListener("click", () => {
-  openModal(
-    "Support Veditalk",
-    "The support option is a placeholder for now.",
-    "Payments are not connected."
-  );
-});
-
-$("accountButton").addEventListener("click", () => {
-  openModal(
-    "Guest mode",
-    "You can use Veditalk without an account, but conversations are temporary.",
-    "Appwrite authentication and cloud chat storage are not connected yet."
-  );
-});
-
-$("loginButton").addEventListener("click", () => {
-  openModal(
-    "Login coming soon",
-    "Appwrite authentication has not been connected yet.",
-    "There is no fake login."
-  );
-});
-
-$("clearHistory").addEventListener("click", () => {
+async function loadConversation(conversationId) {
   if (!currentUser) return;
 
-  chats = [];
-  activeChatId = null;
+  try {
+    const response = await tablesDB.listRows({
+      databaseId: CONFIG.DATABASE_ID,
+      tableId: CONFIG.MESSAGES_TABLE_ID,
 
-  renderHistory();
-  renderMessages();
-  showToast("Visible chat list cleared.");
-});
+      queries: [
+        Appwrite.Query.equal("conversationId", conversationId),
+        Appwrite.Query.equal("userId", currentUser.$id),
+        Appwrite.Query.orderAsc("createdAt"),
+        Appwrite.Query.limit(100)
+      ]
+    });
 
-$("themeButton").addEventListener("click", () => {
-  document.body.classList.toggle("light");
+    clearMessages();
+
+    currentConversationId = conversationId;
+
+    for (const message of response.rows) {
+      if (message.role === "image") {
+        addImageMessage(message.content);
+      } else {
+        addMessage(message.role, message.content);
+      }
+    }
+
+    historyPanel.classList.add("hidden");
+  } catch (error) {
+    showToast(getErrorMessage(error));
+  }
+}
+
+
+function startNewConversation() {
+  currentConversationId = null;
+  guestMessages = [];
+
+  clearMessages();
+
+  historyPanel.classList.add("hidden");
+
+  promptInput.focus();
+}
+
+
+// ==========================================
+// 12. IMAGE GENERATION
+// ==========================================
+
+async function generateImage(prompt) {
+  const request = await paperRequest(
+    "/job/add/paperoffice_imagestudio___generate",
+    {
+      method: "POST",
+
+      body: JSON.stringify({
+        prompt,
+        premium: true,
+        width: 896,
+        height: 1152,
+        output_format: "url",
+        number_of_images: 1,
+        precompile_prompt: true,
+        client_wait: false
+      })
+    }
+  );
+
+  const jobId = getJobId(request);
+
+  if (!jobId) {
+    const directImages = extractImageUrls(request);
+
+    if (directImages.length) return directImages;
+
+    throw new Error("PaperOffice did not return a job ID.");
+  }
+
+  const result = await pollPaperJob(jobId);
+  const images = extractImageUrls(result);
+
+  if (!images.length) {
+    throw new Error("No image URL was returned.");
+  }
+
+  return images;
+}
+
+
+// ==========================================
+// 13. FILE ANALYSIS
+// ==========================================
+
+async function analyzeFile(file, prompt = "") {
+  const formData = new FormData();
+
+  formData.append("file", file);
+
+  if (prompt) {
+    formData.append("prompt", prompt);
+  }
+
+  const request = await paperRequest(
+    "/job/add/paperoffice_aiocr___generate",
+    {
+      method: "POST",
+      body: formData
+    }
+  );
+
+  const jobId = getJobId(request);
+
+  if (!jobId) {
+    const directText = extractText(request);
+
+    if (directText) return directText;
+
+    throw new Error("PaperOffice did not return a job ID.");
+  }
+
+  const result = await pollPaperJob(jobId);
+  const text = extractText(result);
+
+  if (!text) {
+    throw new Error("No readable text was returned.");
+  }
+
+  return text;
+}
+
+
+// ==========================================
+// 14. FILE HANDLING
+// ==========================================
+
+function validateFile(file) {
+  if (!file) return false;
+
+  if (file.size > CONFIG.MAX_FILE_SIZE) {
+    showToast("Maximum file size is 25 MB.");
+    return false;
+  }
+
+  const allowedTypes = [
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/tiff",
+    "image/bmp",
+    "application/pdf"
+  ];
+
+  if (!allowedTypes.includes(file.type)) {
+    showToast("Unsupported file type. Select an image or PDF.");
+    return false;
+  }
+
+  return true;
+}
+
+
+function selectFile(file) {
+  if (!validateFile(file)) return;
+
+  selectedFile = file;
+
+  filePreview.classList.remove("hidden");
+
+  $("fileName").textContent = file.name;
+}
+
+
+function removeSelectedFile() {
+  selectedFile = null;
+
+  fileInput.value = "";
+
+  filePreview.classList.add("hidden");
+}
+
+
+// ==========================================
+// 15. MODE SWITCHING
+// ==========================================
+
+function setMode(mode) {
+  currentMode = mode;
+
+  document.querySelectorAll(".mode-button").forEach(button => {
+    button.classList.toggle(
+      "active",
+      button.dataset.mode === mode
+    );
+  });
+
+  $("modeHint").textContent =
+    mode === "generate"
+      ? "Describe your image in a prompt."
+      : "Attach an image or PDF to analyze.";
+
+  promptInput.placeholder =
+    mode === "generate"
+      ? "Describe the image you want to create..."
+      : "Ask something about your file...";
+
+  const buttonText = sendButton.firstChild;
+
+  if (buttonText?.nodeType === Node.TEXT_NODE) {
+    buttonText.textContent =
+      mode === "generate" ? "Generate " : "Analyze ";
+  }
+}
+
+
+// ==========================================
+// 16. SEND REQUEST
+// ==========================================
+
+async function sendRequest() {
+  if (isProcessing) return;
+
+  const prompt = promptInput.value.trim();
+
+  if (!prompt && !selectedFile) {
+    showToast("Write a prompt or attach a file first.");
+    return;
+  }
+
+  if (currentMode === "analyze" && !selectedFile) {
+    showToast("Attach an image or PDF first.");
+    return;
+  }
+
+  if (currentMode === "generate" && selectedFile) {
+    showToast("Switch to Analyze mode to use your attachment.");
+    return;
+  }
+
+  setProcessing(true);
+
+  const file = selectedFile;
+
+  const userText = prompt ||
+    (file ? `Analyze file: ${file.name}` : "");
+
+  const attachments = file
+    ? [{
+        name: file.name,
+        type: file.type,
+        size: file.size
+      }]
+    : [];
+
+  addMessage("user", userText);
+
+  try {
+    await saveMessage("user", userText, attachments);
+  } catch (error) {
+    console.error("Message saving error:", error);
+    showToast("Your message could not be saved to history.");
+  }
+
+  promptInput.value = "";
+  removeSelectedFile();
+
+  let loadingMessage = null;
+
+  try {
+    if (currentMode === "generate") {
+      loadingMessage = addMessage("assistant", "Creating your image...");
+
+      const images = await generateImage(prompt);
+
+      loadingMessage.remove();
+
+      for (const url of images) {
+        addImageMessage(url);
+
+        try {
+          await saveMessage("image", url);
+        } catch (error) {
+          console.error("Image history saving error:", error);
+        }
+      }
+    } else {
+      loadingMessage = addMessage("assistant", "Reading your file...");
+
+      const result = await analyzeFile(file, prompt);
+
+      loadingMessage.remove();
+
+      addMessage("assistant", result);
+
+      try {
+        await saveMessage("assistant", result);
+      } catch (error) {
+        console.error("OCR history saving error:", error);
+      }
+    }
+  } catch (error) {
+    console.error("Request error:", error);
+
+    loadingMessage?.remove();
+
+    addMessage(
+      "assistant",
+      `I couldn't complete that request.\n\n${getErrorMessage(error)}`
+    );
+  } finally {
+    setProcessing(false);
+  }
+}
+
+
+// ==========================================
+// 17. AUTHENTICATION INTERFACE
+// ==========================================
+
+function showAuth() {
+  authOverlay.classList.remove("hidden");
+  showAuthChoices();
+}
+
+
+function hideAuth() {
+  authOverlay.classList.add("hidden");
+}
+
+
+function showAuthChoices() {
+  authChoice.classList.remove("hidden");
+  authForm.classList.add("hidden");
+
+  $("authMessage").textContent = "";
+}
+
+
+function showAuthForm(mode) {
+  authChoice.classList.add("hidden");
+  authForm.classList.remove("hidden");
+
+  const isRegister = mode === "register";
+  const isOtp = mode === "otp";
+
+  $("nameLabel").classList.toggle("hidden", !isRegister);
+  $("authName").classList.toggle("hidden", !isRegister);
+
+  $("passwordGroup").classList.toggle("hidden", isOtp);
+  $("otpGroup").classList.toggle("hidden", !isOtp);
+
+  $("authSubmit").classList.toggle("hidden", isOtp);
+  $("otpSendButton").classList.toggle("hidden", isOtp);
+
+  $("authName").required = isRegister;
+  $("authPassword").required = !isOtp;
+  $("authOtp").required = isOtp;
+
+  $("authSubmit").textContent =
+    isRegister ? "Create account" : "Log in";
+
+  $("authMessage").textContent = "";
+
+  authForm.dataset.mode = mode;
+}
+
+
+// ==========================================
+// 18. AUTHENTICATION ACTIONS
+// ==========================================
+
+async function registerUser(name, email, password) {
+  await account.create({
+    userId: Appwrite.ID.unique(),
+    email,
+    password,
+    name
+  });
+
+  await account.createEmailPasswordSession({
+    email,
+    password
+  });
+
+  await refreshUser();
+}
+
+
+async function loginUser(email, password) {
+  await account.createEmailPasswordSession({
+    email,
+    password
+  });
+
+  await refreshUser();
+}
+
+
+async function sendEmailCode(email) {
+  pendingOtpUserId = Appwrite.ID.unique();
+
+  await account.createEmailToken({
+    userId: pendingOtpUserId,
+    email
+  });
+
+  showAuthForm("otp");
+
+  showToast("Check your email for the verification code.");
+}
+
+
+async function verifyEmailCode(code) {
+  if (!pendingOtpUserId) {
+    throw new Error("Request an email code first.");
+  }
+
+  await account.createSession({
+    userId: pendingOtpUserId,
+    secret: code
+  });
+
+  pendingOtpUserId = null;
+
+  await refreshUser();
+}
+
+
+async function refreshUser() {
+  if (!appwriteReady) return;
+
+  try {
+    currentUser = await account.get();
+
+    accountStatus.textContent =
+      currentUser.name || currentUser.email;
+
+    accountButton.textContent = "Account";
+    historyButton.classList.remove("hidden");
+
+    hideAuth();
+  } catch {
+    currentUser = null;
+
+    accountStatus.textContent = "Guest mode";
+    accountButton.textContent = "Log in";
+
+    historyButton.classList.add("hidden");
+  }
+}
+
+
+async function logoutUser() {
+  try {
+    await account.deleteSession({
+      sessionId: "current"
+    });
+
+    currentUser = null;
+    currentConversationId = null;
+    guestMessages = [];
+
+    clearMessages();
+
+    accountStatus.textContent = "Guest mode";
+    accountButton.textContent = "Log in";
+
+    historyButton.classList.add("hidden");
+    historyPanel.classList.add("hidden");
+
+    showAuth();
+
+    showToast("You are now using guest mode.");
+  } catch (error) {
+    showToast(getErrorMessage(error));
+  }
+}
+
+
+// ==========================================
+// 19. AUTHENTICATION FORM
+// ==========================================
+
+async function submitAuthForm(event) {
+  event.preventDefault();
+
+  const mode = authForm.dataset.mode;
+
+  const name = $("authName").value.trim();
+  const email = $("authEmail").value.trim();
+  const password = $("authPassword").value;
+  const code = $("authOtp").value.trim();
+
+  const message = $("authMessage");
+  const submitButton = $("authSubmit");
+
+  message.textContent = "Please wait...";
+
+  submitButton.disabled = true;
+  $("otpSendButton").disabled = true;
+
+  try {
+    if (mode === "register") {
+      if (!name || !email || !password) {
+        throw new Error("Complete all the fields.");
+      }
+
+      if (password.length < 8) {
+        throw new Error("Password must contain at least 8 characters.");
+      }
+
+      await registerUser(name, email, password);
+    }
+
+    if (mode === "login") {
+      if (!email || !password) {
+        throw new Error("Enter your email and password.");
+      }
+
+      await loginUser(email, password);
+    }
+
+    if (mode === "otp") {
+      if (!code) {
+        throw new Error("Enter the email verification code.");
+      }
+
+      await verifyEmailCode(code);
+    }
+  } catch (error) {
+    message.textContent = getErrorMessage(error);
+  } finally {
+    submitButton.disabled = false;
+    $("otpSendButton").disabled = false;
+  }
+}
+
+
+// ==========================================
+// 20. THEME
+// ==========================================
+
+function loadTheme() {
+  const savedTheme = localStorage.getItem("veditalk-theme");
+
+  const isLight = savedTheme === "light";
+
+  document.body.classList.toggle("light", isLight);
+
+  themeButton.textContent = isLight ? "☀" : "☼";
+}
+
+
+function toggleTheme() {
+  const isLight = document.body.classList.toggle("light");
 
   localStorage.setItem(
     "veditalk-theme",
-    document.body.classList.contains("light") ? "light" : "dark"
+    isLight ? "light" : "dark"
   );
-});
 
-$("openSidebar").addEventListener("click", () => {
-  ui.sidebar.classList.add("open");
-});
-
-$("closeSidebar").addEventListener("click", closeSidebar);
-$("closeModal").addEventListener("click", closeModal);
-$("modalOkay").addEventListener("click", closeModal);
-
-ui.modal.addEventListener("click", event => {
-  if (event.target === ui.modal) closeModal();
-});
-
-if (localStorage.getItem("veditalk-theme") === "light") {
-  document.body.classList.add("light");
+  themeButton.textContent = isLight ? "☀" : "☼";
 }
 
-setAuthenticatedUser(null);
-updateFeatureOptions();
-updateSendButton();
+
+// ==========================================
+// 21. EVENT LISTENERS
+// ==========================================
+
+// Mode buttons
+
+document.querySelectorAll(".mode-button").forEach(button => {
+  button.addEventListener("click", () => {
+    setMode(button.dataset.mode);
+  });
+});
+
+
+// Send
+
+sendButton.addEventListener("click", sendRequest);
+
+promptInput.addEventListener("keydown", event => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    sendRequest();
+  }
+});
+
+
+// Attach file
+
+attachButton.addEventListener("click", () => {
+  fileInput.click();
+});
+
+fileInput.addEventListener("change", event => {
+  const file = event.target.files[0];
+
+  if (file) {
+    selectFile(file);
+  }
+});
+
+
+// Remove file
+
+$("removeFileButton").addEventListener(
+  "click",
+  removeSelectedFile
+);
+
+
+// Theme
+
+themeButton.addEventListener("click", toggleTheme);
+
+
+// Account button
+
+accountButton.addEventListener("click", () => {
+  if (currentUser) {
+    const shouldLogout = confirm(
+      `Logged in as ${currentUser.email}.\n\nLog out?`
+    );
+
+    if (shouldLogout) {
+      logoutUser();
+    }
+  } else {
+    showAuth();
+  }
+});
+
+
+// Guest mode
+
+$("guestButton").addEventListener("click", () => {
+  currentUser = null;
+
+  accountStatus.textContent = "Guest mode";
+  accountButton.textContent = "Log in";
+
+  historyButton.classList.add("hidden");
+
+  hideAuth();
+});
+
+
+// Login
+
+$("showLoginButton").addEventListener("click", () => {
+  showAuthForm("login");
+});
+
+
+// Registration
+
+$("showSignupButton").addEventListener("click", () => {
+  showAuthForm("register");
+});
+
+
+// Back
+
+$("authBackButton").addEventListener("click", () => {
+  showAuthChoices();
+});
+
+
+// Submit login / registration / OTP
+
+authForm.addEventListener("submit", submitAuthForm);
+
+
+// Request OTP
+
+$("otpSendButton").addEventListener("click", async () => {
+  const email = $("authEmail").value.trim();
+
+  if (!email) {
+    showToast("Enter your email address first.");
+    return;
+  }
+
+  try {
+    $("otpSendButton").disabled = true;
+
+    await sendEmailCode(email);
+  } catch (error) {
+    $("authMessage").textContent = getErrorMessage(error);
+  } finally {
+    $("otpSendButton").disabled = false;
+  }
+});
+
+
+// History
+
+historyButton.addEventListener("click", () => {
+  if (historyPanel.classList.contains("hidden")) {
+    loadHistory();
+  } else {
+    historyPanel.classList.add("hidden");
+  }
+});
+
+
+// New conversation
+
+$("newChatButton").addEventListener("click", startNewConversation);
+
+
+// Close history
+
+$("closeHistoryButton").addEventListener("click", () => {
+  historyPanel.classList.add("hidden");
+});
+
+
+// Close history when clicking outside
+
+document.addEventListener("click", event => {
+  if (
+    historyPanel &&
+    !historyPanel.classList.contains("hidden") &&
+    !historyPanel.contains(event.target) &&
+    !historyButton.contains(event.target)
+  ) {
+    historyPanel.classList.add("hidden");
+  }
+});
+
+
+// ==========================================
+// 22. STARTUP
+// ==========================================
+
+async function initializeVeditalk() {
+  loadTheme();
+
+  setMode("generate");
+
+  setProcessing(false);
+
+  const initialized = initializeAppwrite();
+
+  if (!initialized) {
+    accountStatus.textContent = "Guest mode";
+    accountButton.textContent = "Log in";
+
+    return;
+  }
+
+  await refreshUser();
+
+  if (!currentUser) {
+    accountStatus.textContent = "Guest mode";
+    accountButton.textContent = "Log in";
+  }
+}
+
+initializeVeditalk();
