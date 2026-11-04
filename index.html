@@ -1,57 +1,204 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#101014">
-  <title>Veditalk</title>
+  <meta name="theme-color" content="#10111a">
+  <title>Veditalk | AI Workspace</title>
   <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/appwrite@29.0.0"></script>
+  <script src="script.js" defer></script>
 </head>
 <body>
   <div class="app">
-    <aside class="sidebar" id="sidebar">
-      <div class="brand"><div class="brand-icon">✦</div><span>vedi<span class="purple">talk</span></span><button class="icon-btn mobile-close" id="closeSidebar">×</button></div>
-      <button class="new-chat" id="newChat">＋ New chat</button>
-      <section class="history" id="historySection" hidden><div class="history-heading"><span>RECENT</span><button id="clearHistory" class="text-btn">Clear</button></div><div id="historyList"></div></section>
-      <div class="sidebar-bottom">
-        <button class="upgrade" id="upgradeButton"><span>✧</span><span><b>Support Veditalk</b><small>Help the project grow</small></span><span class="upgrade-arrow">↗</span></button>
-        <button class="account" id="accountButton"><span class="avatar" id="accountAvatar">G</span><span><b id="accountName">Guest</b><small id="accountStatus">Not signed in</small></span></button>
+    <header class="topbar">
+      <a class="brand" href="#">
+        <span class="brand-icon">V</span>
+        <span>Veditalk</span>
+      </a>
+
+      <div class="header-right">
+        <span class="connection-status">
+          <span class="status-dot"></span>
+          PaperOffice
+        </span>
+        <span id="accountStatus">Guest mode</span>
+        <button id="historyButton" class="header-button hidden">History</button>
+        <button id="accountButton" class="header-button">Log in</button>
+        <button id="themeButton" class="icon-button" title="Toggle theme">☼</button>
       </div>
-    </aside>
+    </header>
+
     <main class="main">
-      <header class="topbar"><button class="icon-btn menu-btn" id="openSidebar">☰</button><div class="topbar-title">Veditalk <span class="preview">PAPEROFFICE</span></div><div class="top-actions"><button class="icon-btn" id="themeButton" title="Change theme">☼</button><button class="login-btn" id="loginButton">Log in</button></div></header>
-      <section class="chat">
-        <div class="welcome" id="welcome">
-          <div class="welcome-icon">✦</div><p class="eyebrow">YOUR AI SPACE</p><h1>What can I help<br><span>you with?</span></h1><p class="subtitle">Work with documents, translate text, create images, and explore tools.</p>
-          <div class="suggestions">
-            <button class="suggestion" data-feature="summarize" data-prompt="Summarize this document."><span>▤</span><b>Summarize a file</b><small>Get the key points</small></button>
-            <button class="suggestion" data-feature="translate" data-prompt="Hello, how are you?"><span>文</span><b>Translate text</b><small>Switch between languages</small></button>
-            <button class="suggestion" data-feature="image-gen" data-prompt="A tiny astronaut exploring a glowing garden on the moon."><span>✧</span><b>Create an image</b><small>Turn a prompt into artwork</small></button>
-            <button class="suggestion" data-feature="ocr" data-prompt=""><span>⌕</span><b>Read a document</b><small>Extract text from a file</small></button>
-          </div>
+      <section class="welcome" id="welcome">
+        <div class="welcome-icon">✦</div>
+        <p class="eyebrow">YOUR CREATIVE AI WORKSPACE</p>
+        <h1>What are we creating?</h1>
+        <p class="welcome-description">
+          Generate images or extract text from images and PDFs.
+        </p>
+      </section>
+
+      <section class="mode-switch">
+        <button class="mode-button active" data-mode="generate">
+          <span>✦</span> Generate image
+        </button>
+        <button class="mode-button" data-mode="analyze">
+          <span>▧</span> Read image / PDF
+        </button>
+      </section>
+
+      <section id="messages" class="messages" aria-live="polite"></section>
+
+      <section class="composer-section">
+        <div id="filePreview" class="file-preview hidden">
+          <span id="fileName"></span>
+          <button id="removeFileButton" class="remove-file">×</button>
         </div>
-        <div class="messages" id="messages"></div>
-        <div class="composer-wrap">
-          <div class="attachments" id="attachments" hidden></div>
-          <div class="composer">
-            <div class="feature-row"><label for="featureSelect">TOOL</label><select id="featureSelect">
-              <option value="chat">Chat</option><option value="ocr">Text recognition (OCR)</option><option value="translate">Translate text</option><option value="summarize">Summarize / analyze document</option><option value="image-analyze">Analyze image</option><option value="handwriting">Recognize handwriting</option><option value="sentiment">Sentiment analysis</option><option value="extract">Extract names and data</option><option value="tts">Text to speech</option><option value="stt">Speech to text</option><option value="image-gen">Generate image</option><option value="currency">Currency converter</option><option value="weather">Weather lookup</option><option value="address">Address lookup</option><option value="demo">API demo / connection test</option>
-            </select></div>
-            <div class="tool-options" id="toolOptions" hidden>
-              <div id="languageOptions" hidden><label for="targetLanguage">TARGET LANGUAGE</label><select id="targetLanguage"><option value="en">English</option><option value="ar">Arabic</option><option value="de">German</option><option value="fr">French</option><option value="es">Spanish</option><option value="it">Italian</option><option value="pt">Portuguese</option><option value="nl">Dutch</option><option value="zh">Chinese</option><option value="ja">Japanese</option><option value="tr">Turkish</option><option value="ru">Russian</option><option value="hi">Hindi</option></select></div>
-              <div id="lookupOptions" hidden><label for="lookupInput" id="lookupLabel">LOOKUP</label><input id="lookupInput" type="text" placeholder="Enter a city or address"></div>
-              <div id="currencyOptions" hidden><label for="currencyAmount">AMOUNT</label><input id="currencyAmount" type="number" min="0" step="any" value="1"><label for="currencyFrom">FROM</label><select id="currencyFrom"><option>MYR</option><option>USD</option><option>EUR</option><option>GBP</option><option>JPY</option><option>SGD</option><option>AUD</option><option>CAD</option></select><label for="currencyTo">TO</label><select id="currencyTo"><option>USD</option><option>MYR</option><option>EUR</option><option>GBP</option><option>JPY</option><option>SGD</option><option>AUD</option><option>CAD</option></select></div>
+
+        <div class="composer">
+          <textarea
+            id="promptInput"
+            rows="2"
+            maxlength="2000"
+            placeholder="Describe the image you want to create..."
+          ></textarea>
+
+          <div class="composer-bottom">
+            <div class="composer-tools">
+              <button id="attachButton" class="tool-button">
+                ＋ Attach file
+              </button>
+              <span id="modeHint">Describe your image in a prompt.</span>
             </div>
-            <textarea id="messageInput" rows="1" maxlength="8000" placeholder="Choose a tool and enter your request..."></textarea>
-            <div class="composer-bottom"><div class="tools"><input type="file" id="fileInput" accept="image/*,.pdf,audio/*,.doc,.docx" multiple hidden><button class="tool-btn" id="attachButton">＋ Attach file</button><span class="file-hint">Images, PDF, audio</span></div><button class="send-btn" id="sendButton" disabled>↑</button></div>
+
+            <button id="sendButton" class="send-button">
+              Generate <span>↑</span>
+            </button>
           </div>
-          <p class="disclaimer">Guest chats are temporary. Publishable key is origin-locked and credit-limited.</p>
+
+          <input
+            id="fileInput"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/tiff,image/bmp,application/pdf,.pdf"
+            hidden
+          >
         </div>
+
+        <p class="disclaimer">
+          AI-generated results may contain mistakes. Don't upload private or sensitive documents.
+        </p>
       </section>
     </main>
+
+    <footer class="footer">
+      <span>Veditalk</span>
+      <span>Powered by PaperOffice AI</span>
+    </footer>
   </div>
-  <div class="modal-backdrop" id="modal" hidden><div class="modal"><button class="icon-btn modal-close" id="closeModal">×</button><div class="modal-icon">✦</div><h2 id="modalTitle">Veditalk</h2><p id="modalDescription"></p><p class="modal-note" id="modalNote"></p><button class="primary-btn" id="modalOkay">Got it</button></div></div>
-  <div class="toast" id="toast"></div>
-  <script src="script.js"></script>
+
+  <!-- AUTHENTICATION -->
+  <div id="authOverlay" class="overlay">
+    <section class="auth-card">
+      <div class="auth-brand">
+        <span class="brand-icon">V</span>
+        <span>Veditalk</span>
+      </div>
+
+      <h2 id="authTitle">Welcome to Veditalk</h2>
+      <p id="authDescription">
+        Use Veditalk immediately or sign in to save your conversations.
+      </p>
+
+      <div id="authChoice" class="auth-choice">
+        <button id="guestButton" class="primary-button">
+          Continue as Guest
+        </button>
+
+        <button id="showLoginButton" class="secondary-button">
+          Log in
+        </button>
+
+        <button id="showSignupButton" class="secondary-button">
+          Create account
+        </button>
+      </div>
+
+      <form id="authForm" class="auth-form hidden">
+        <label id="nameLabel" class="hidden" for="authName">Name</label>
+        <input
+          id="authName"
+          class="auth-input hidden"
+          type="text"
+          placeholder="Your name"
+        >
+
+        <label for="authEmail">Email</label>
+        <input
+          id="authEmail"
+          class="auth-input"
+          type="email"
+          placeholder="you@example.com"
+          required
+        >
+
+        <div id="passwordGroup">
+          <label for="authPassword">Password</label>
+          <input
+            id="authPassword"
+            class="auth-input"
+            type="password"
+            minlength="8"
+            placeholder="At least 8 characters"
+          >
+        </div>
+
+        <div id="otpGroup" class="hidden">
+          <label for="authOtp">Email code</label>
+          <input
+            id="authOtp"
+            class="auth-input"
+            type="text"
+            placeholder="Enter your email code"
+          >
+        </div>
+
+        <button id="authSubmit" class="primary-button" type="submit">
+          Continue
+        </button>
+
+        <button id="otpSendButton" class="secondary-button hidden" type="button">
+          Send email code
+        </button>
+
+        <button id="authBackButton" class="text-button" type="button">
+          Back
+        </button>
+      </form>
+
+      <p id="authMessage" class="auth-message"></p>
+
+      <p class="auth-footnote">
+        Guest conversations are temporary. Sign in to save conversations.
+      </p>
+    </section>
+  </div>
+
+  <!-- CONVERSATION HISTORY -->
+  <aside id="historyPanel" class="history-panel hidden">
+    <div class="history-heading">
+      <strong>Saved conversations</strong>
+      <button id="closeHistoryButton" class="icon-button">×</button>
+    </div>
+
+    <button id="newChatButton" class="primary-button">
+      ＋ New conversation
+    </button>
+
+    <div id="historyList" class="history-list"></div>
+  </aside>
+
+  <div id="toast" class="toast"></div>
 </body>
 </html>
