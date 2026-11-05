@@ -1,4 +1,3 @@
-
 "use strict";
 
 // ==========================================
@@ -7,10 +6,10 @@
 
 const CONFIG = {
   PAPER_API_URL: "https://api.paperoffice.ai/latest",
+  PAPER_API_KEY: "po_pk_910557515_de081807349357782b45fb50b60c5e0c484a42e7a1b6410c    ",
 
-  // PaperOffice publishable key.
-  // Never place a po_sk_ secret key in frontend code.
-  PAPER_API_KEY: "po_pk_910557515_de081807349357782b45fb50b60c5e0c484a42e7a1b6410c",
+  TEXT_API_ENDPOINT: "https://veditalk-ai.qabunayla.workers.dev/",
+  TEXT_API_KEY: "",
 
   APPWRITE_ENDPOINT: "https://sgp.cloud.appwrite.io/v1",
   APPWRITE_PROJECT_ID: "6ae9e1da00258a582138",
@@ -18,9 +17,9 @@ const CONFIG = {
   DATABASE_ID: "6ae9e3b600286db871f6",
   CONVERSATIONS_TABLE_ID: "6ae9e3de002015ecb63f",
   MESSAGES_TABLE_ID: "6ae9e702003a2568a818",
+  STORAGE_BUCKET_ID: "6aea8509000608d91e20",
 
   MAX_FILE_SIZE: 25 * 1024 * 1024,
-
   POLL_INTERVAL: 5000,
   MAX_POLL_ATTEMPTS: 60
 };
@@ -33,23 +32,25 @@ const CONFIG = {
 let currentUser = null;
 let currentConversationId = null;
 
-let currentMode = "generate";
+let currentMode = "chat";
 let selectedFile = null;
 
 let isProcessing = false;
 let pendingOtpUserId = null;
+let pendingMode = null;
 
 let appwriteReady = false;
 
 let client = null;
 let account = null;
 let tablesDB = null;
+let storage = null;
 
 let guestMessages = [];
 
 
 // ==========================================
-// 3. DOM ELEMENTS
+// 3. DOM HELPERS
 // ==========================================
 
 const $ = id => document.getElementById(id);
@@ -99,21 +100,6 @@ function showToast(message) {
 }
 
 
-function escapeHTML(value) {
-  return String(value).replace(/[&<>"']/g, character => {
-    const entities = {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#039;"
-    };
-
-    return entities[character];
-  });
-}
-
-
 function getErrorMessage(error) {
   return error?.message || "Something went wrong. Please try again.";
 }
@@ -122,23 +108,33 @@ function getErrorMessage(error) {
 function setProcessing(value) {
   isProcessing = value;
 
-  if (sendButton) {
-    sendButton.disabled = value;
+  if (!sendButton) return;
 
-    const label = sendButton.querySelector("span");
+  sendButton.disabled = value;
 
-    if (label) {
-      label.textContent = value ? "..." : "↑";
-    }
+  const label = sendButton.querySelector("span");
 
-    if (sendButton.firstChild?.nodeType === Node.TEXT_NODE) {
-      sendButton.firstChild.textContent = value
-        ? "Working "
-        : currentMode === "generate"
-          ? "Generate "
-          : "Analyze ";
-    }
+  if (label) {
+    label.textContent = value ? "..." : "↑";
   }
+
+  const labels = {
+    chat: "Send ",
+    coding: "Run ",
+    generate: "Generate ",
+    analyze: "Analyze "
+  };
+
+  if (sendButton.firstChild?.nodeType === Node.TEXT_NODE) {
+    sendButton.firstChild.textContent = value
+      ? "Working "
+      : labels[currentMode];
+  }
+}
+
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 
@@ -149,7 +145,7 @@ function setProcessing(value) {
 function initializeAppwrite() {
   if (!window.Appwrite) {
     console.error("Appwrite SDK was not loaded.");
-    showToast("Appwrite SDK failed to load. Check your internet connection.");
+    showToast("Appwrite SDK failed to load.");
     return false;
   }
 
@@ -162,6 +158,7 @@ function initializeAppwrite() {
 
     account = new Appwrite.Account(client);
     tablesDB = new Appwrite.TablesDB(client);
+    storage = new Appwrite.Storage(client);
 
     appwriteReady = true;
 
@@ -175,24 +172,31 @@ function initializeAppwrite() {
 
 
 // ==========================================
-// 6. PAPER OFFICE API
+// 6. PAPEROFFICE API
 // ==========================================
 
 function getPaperApiKey() {
   const key = CONFIG.PAPER_API_KEY.trim();
 
-  if (!key || key.includes("PASTE_YOUR_KEY")) {
-    throw new Error("Add your PaperOffice publishable key in script.js.");
+  if (
+    !key ||
+    key.includes("PASTE_YOUR_KEY")
+  ) {
+    throw new Error(
+      "Add your PaperOffice publishable key in script.js."
+    );
   }
 
   if (key.startsWith("po_sk_")) {
     throw new Error(
-      "Secret PaperOffice keys must not be used in frontend code."
+      "Secret PaperOffice keys must never be used in frontend code."
     );
   }
 
   if (!key.startsWith("po_pk_")) {
-    throw new Error("Invalid PaperOffice publishable key format.");
+    throw new Error(
+      "Invalid PaperOffice publishable key format."
+    );
   }
 
   return key;
@@ -221,6 +225,11 @@ async function paperRequest(endpoint, options = {}) {
 
   const result = await response.json().catch(() => ({}));
 
+  // DEBUGGING
+  console.log("PaperOffice endpoint:", endpoint);
+  console.log("PaperOffice HTTP status:", response.status);
+  console.log("PaperOffice response:", result);
+
   if (!response.ok) {
     throw new Error(
       result.message ||
@@ -229,9 +238,23 @@ async function paperRequest(endpoint, options = {}) {
     );
   }
 
+  // Some APIs return errors inside HTTP 200 responses.
+  if (
+    result.success === false ||
+    result.error ||
+    result.job_status === "failed"
+  ) {
+    console.error("PaperOffice job error:", result);
+
+    throw new Error(
+      result.message ||
+      result.error ||
+      "PaperOffice rejected the job configuration."
+    );
+  }
+
   return result;
 }
-
 
 function getJobId(result) {
   return (
@@ -252,29 +275,29 @@ async function pollPaperJob(jobId) {
     attempt < CONFIG.MAX_POLL_ATTEMPTS;
     attempt++
   ) {
-    await new Promise(resolve => {
-      setTimeout(resolve, CONFIG.POLL_INTERVAL);
-    });
+    await sleep(CONFIG.POLL_INTERVAL);
 
     const result = await paperRequest(
-      `/job/status/${encodeURIComponent(jobId)}`
+      `/job/get/${encodeURIComponent(jobId)}`
     );
 
     const status = String(
-      result.status ||
-      result.data?.status ||
+      result?.job_status ||
+      result?.data?.job_status ||
+      result?.status ||
+      result?.data?.status ||
       ""
     ).toLowerCase();
 
-    if (
-      ["completed", "complete", "success", "succeeded"].includes(status)
-    ) {
-      return result;
+    if (status === "completed") {
+      return (
+        result.job_result ??
+        result.data?.job_result ??
+        result
+      );
     }
 
-    if (
-      ["failed", "error", "cancelled"].includes(status)
-    ) {
+    if (["failed", "error", "cancelled"].includes(status)) {
       throw new Error(
         result.message ||
         result.error ||
@@ -283,7 +306,9 @@ async function pollPaperJob(jobId) {
     }
   }
 
-  throw new Error("The request timed out. Please try again.");
+  throw new Error(
+    "The request timed out. Please try again."
+  );
 }
 
 
@@ -297,7 +322,10 @@ function extractText(value) {
   }
 
   if (Array.isArray(value)) {
-    return value.map(extractText).filter(Boolean).join("\n");
+    return value
+      .map(extractText)
+      .filter(Boolean)
+      .join("\n");
   }
 
   if (!value || typeof value !== "object") {
@@ -307,8 +335,6 @@ function extractText(value) {
   const fields = [
     "text",
     "content",
-    "result",
-    "output",
     "transcription",
     "extracted_text",
     "markdown"
@@ -320,8 +346,14 @@ function extractText(value) {
     }
   }
 
-  for (const field of ["data", "results"]) {
-    if (value[field]) {
+  for (const field of [
+    "data",
+    "result",
+    "results",
+    "output",
+    "job_result"
+  ]) {
+    if (value[field] !== undefined) {
       const extracted = extractText(value[field]);
 
       if (extracted) return extracted;
@@ -336,11 +368,7 @@ function extractImageUrls(value) {
   if (!value) return [];
 
   if (typeof value === "string") {
-    if (/^https?:\/\//i.test(value)) {
-      return [value];
-    }
-
-    return [];
+    return /^https?:\/\//i.test(value) ? [value] : [];
   }
 
   if (Array.isArray(value)) {
@@ -370,9 +398,10 @@ function extractImageUrls(value) {
     "result",
     "results",
     "output",
-    "images"
+    "images",
+    "job_result"
   ]) {
-    if (value[field]) {
+    if (value[field] !== undefined) {
       urls.push(...extractImageUrls(value[field]));
     }
   }
@@ -382,7 +411,7 @@ function extractImageUrls(value) {
 
 
 // ==========================================
-// 8. CHAT MESSAGES
+// 8. MESSAGE DISPLAY
 // ==========================================
 
 function scrollToBottom() {
@@ -394,25 +423,46 @@ function scrollToBottom() {
 
 
 function clearMessages() {
-  messagesContainer.innerHTML = "";
+  if (messagesContainer) {
+    messagesContainer.innerHTML = "";
+  }
 }
 
 
 function addMessage(role, content) {
+  if (!messagesContainer) return null;
+
   const wrapper = document.createElement("div");
   wrapper.className = `message ${role}`;
 
   const label = document.createElement("div");
   label.className = "message-label";
-  label.textContent = role === "user" ? "You" : "Veditalk";
+
+  label.textContent =
+    role === "user" ? "You" : "Veditalk";
 
   const messageContent = document.createElement("div");
   messageContent.className = "message-content";
-  messageContent.textContent = content;
+
+  if (
+    role === "assistant" &&
+    typeof marked !== "undefined"
+  ) {
+    messageContent.innerHTML = marked.parse(
+      String(content)
+    );
+  } else {
+    messageContent.textContent = String(content);
+  }
 
   wrapper.append(label, messageContent);
-
   messagesContainer.appendChild(wrapper);
+
+  if (window.hljs) {
+    wrapper.querySelectorAll("pre code").forEach(block => {
+      window.hljs.highlightElement(block);
+    });
+  }
 
   scrollToBottom();
 
@@ -421,6 +471,8 @@ function addMessage(role, content) {
 
 
 function addImageMessage(url) {
+  if (!messagesContainer) return null;
+
   const wrapper = document.createElement("div");
   wrapper.className = "message assistant";
 
@@ -440,7 +492,6 @@ function addImageMessage(url) {
   };
 
   wrapper.append(label, image);
-
   messagesContainer.appendChild(wrapper);
 
   scrollToBottom();
@@ -450,7 +501,7 @@ function addImageMessage(url) {
 
 
 // ==========================================
-// 9. APPWRITE ROW PERMISSIONS
+// 9. APPWRITE PERMISSIONS
 // ==========================================
 
 function getRowPermissions(userId) {
@@ -466,8 +517,42 @@ function getRowPermissions(userId) {
 // 10. CONVERSATION STORAGE
 // ==========================================
 
+function navigateToConversation(conversationId) {
+  const url = `/v/${encodeURIComponent(conversationId)}`;
+
+  if (window.location.pathname !== url) {
+    history.pushState(
+      { conversationId },
+      "",
+      url
+    );
+  }
+}
+
+
+function navigateToHome() {
+  if (window.location.pathname !== "/") {
+    history.pushState({}, "", "/");
+  }
+}
+
+
+function getConversationIdFromUrl() {
+  const match = window.location.pathname.match(/^\/v\/([^/]+)\/?$/);
+
+  if (!match) return null;
+
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+}
+
 async function createConversation(firstMessage) {
-  if (!currentUser || !appwriteReady) return null;
+  if (!currentUser || !appwriteReady) {
+    return null;
+  }
 
   const now = new Date().toISOString();
 
@@ -478,7 +563,7 @@ async function createConversation(firstMessage) {
 
     data: {
       userId: currentUser.$id,
-      title: firstMessage.slice(0, 70) || "New conversation",
+      title: String(firstMessage).slice(0, 70) || "New conversation",
       createdAt: now,
       updatedAt: now
     },
@@ -488,21 +573,23 @@ async function createConversation(firstMessage) {
 
   currentConversationId = conversation.$id;
 
+  navigateToConversation(conversation.$id);
+
   return conversation;
 }
 
 
 async function saveMessage(role, content, attachments = []) {
-  if (!currentUser) {
-    guestMessages.push({
-      role,
-      content,
-      attachments,
-      createdAt: new Date().toISOString()
-    });
+  const message = {
+    role,
+    content: String(content),
+    attachments,
+    createdAt: new Date().toISOString()
+  };
 
-    return;
-  }
+  guestMessages.push(message);
+
+  if (!currentUser) return;
 
   if (!currentConversationId) {
     await createConversation(
@@ -522,8 +609,7 @@ async function saveMessage(role, content, attachments = []) {
       userId: currentUser.$id,
       role,
       content: String(content).slice(0, 10000),
-      createdAt: now,
-      attachments: JSON.stringify(attachments).slice(0, 10000)
+      createdAt: now
     },
 
     permissions: getRowPermissions(currentUser.$id)
@@ -540,13 +626,39 @@ async function saveMessage(role, content, attachments = []) {
   });
 }
 
+async function uploadGeneratedImage(dataURI) {
+  if (!currentUser || !storage) {
+    throw new Error("Image storage requires a signed-in account.");
+  }
+
+  const response = await fetch(dataURI);
+  const blob = await response.blob();
+
+  const file = new File(
+    [blob],
+    `generated-${Date.now()}.jpg`,
+    { type: blob.type || "image/jpeg" }
+  );
+
+  const uploaded = await storage.createFile({
+    bucketId: CONFIG.STORAGE_BUCKET_ID,
+    fileId: Appwrite.ID.unique(),
+    file,
+    permissions: getRowPermissions(currentUser.$id)
+  });
+
+  return uploaded.$id;
+}
+
 
 // ==========================================
-// 11. LOAD CONVERSATIONS
+// 11. CONVERSATION HISTORY
 // ==========================================
 
 async function loadHistory() {
   if (!currentUser || !appwriteReady) return;
+
+  if (!historyList || !historyPanel) return;
 
   historyList.innerHTML = "<p>Loading conversations...</p>";
   historyPanel.classList.remove("hidden");
@@ -565,8 +677,10 @@ async function loadHistory() {
 
     historyList.innerHTML = "";
 
-    if (!response.rows.length) {
-      historyList.textContent = "No saved conversations yet.";
+    if (!response.rows?.length) {
+      historyList.textContent =
+        "No saved conversations yet.";
+
       return;
     }
 
@@ -574,10 +688,12 @@ async function loadHistory() {
       const button = document.createElement("button");
 
       button.className = "history-item";
-      button.textContent = conversation.title || "Untitled conversation";
 
-      button.addEventListener("click", async () => {
-        await loadConversation(conversation.$id);
+      button.textContent =
+        conversation.title || "Untitled conversation";
+
+      button.addEventListener("click", () => {
+        loadConversation(conversation.$id);
       });
 
       historyList.appendChild(button);
@@ -585,14 +701,18 @@ async function loadHistory() {
   } catch (error) {
     console.error("History loading error:", error);
 
-    historyList.textContent = "Unable to load conversations.";
+    historyList.textContent =
+      "Unable to load conversations.";
+
     showToast(getErrorMessage(error));
   }
 }
 
 
+
+
 async function loadConversation(conversationId) {
-  if (!currentUser) return;
+  if (!currentUser || !appwriteReady) return;
 
   try {
     const response = await tablesDB.listRows({
@@ -610,31 +730,73 @@ async function loadConversation(conversationId) {
     clearMessages();
 
     currentConversationId = conversationId;
+    guestMessages = [];
 
-    for (const message of response.rows) {
+    for (const message of response.rows || []) {
+      guestMessages.push({
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt
+      });
+
       if (message.role === "image") {
-        addImageMessage(message.content);
+        try {
+          const imageData = JSON.parse(message.content);
+
+          if (
+            imageData.type === "appwrite-image" &&
+            imageData.fileId
+          ) {
+            const preview = storage.getFilePreview({
+              bucketId: CONFIG.STORAGE_BUCKET_ID,
+              fileId: imageData.fileId
+            });
+
+            const imageUrl = preview instanceof URL
+              ? preview.href
+              : String(preview);
+
+            addImageMessage(imageUrl);
+          } else {
+            addImageMessage(message.content);
+          }
+        } catch (error) {
+          console.error("Image loading error:", error);
+
+          addMessage(
+            "assistant",
+            "This image could not be loaded."
+          );
+        }
       } else {
         addMessage(message.role, message.content);
       }
     }
 
-    historyPanel.classList.add("hidden");
+    historyPanel?.classList.add("hidden");
+
+    navigateToConversation(conversationId);
+
   } catch (error) {
+    console.error("Conversation loading error:", error);
     showToast(getErrorMessage(error));
   }
 }
+
+
 
 
 function startNewConversation() {
   currentConversationId = null;
   guestMessages = [];
 
+  navigateToHome();
+
   clearMessages();
 
-  historyPanel.classList.add("hidden");
+  historyPanel?.classList.add("hidden");
 
-  promptInput.focus();
+  promptInput?.focus();
 }
 
 
@@ -643,47 +805,42 @@ function startNewConversation() {
 // ==========================================
 
 async function generateImage(prompt) {
-  const request = await paperRequest(
-    "/job/add/paperoffice_imagestudio___generate",
+  const response = await fetch(
+    CONFIG.TEXT_API_ENDPOINT,
     {
       method: "POST",
 
+      headers: {
+        "Content-Type": "application/json"
+      },
+
       body: JSON.stringify({
-        prompt,
-        premium: true,
-        width: 896,
-        height: 1152,
-        output_format: "url",
-        number_of_images: 1,
-        precompile_prompt: true,
-        client_wait: false
+        mode: "generate",
+        prompt
       })
     }
   );
 
-  const jobId = getJobId(request);
+  const result = await response.json().catch(() => ({}));
 
-  if (!jobId) {
-    const directImages = extractImageUrls(request);
-
-    if (directImages.length) return directImages;
-
-    throw new Error("PaperOffice did not return a job ID.");
+  if (!response.ok) {
+    throw new Error(
+      result.error || `Image generation failed: HTTP ${response.status}`
+    );
   }
 
-  const result = await pollPaperJob(jobId);
-  const images = extractImageUrls(result);
-
-  if (!images.length) {
-    throw new Error("No image URL was returned.");
+  if (!result.dataURI) {
+    throw new Error(
+      "The image model returned no image."
+    );
   }
 
-  return images;
+  return [result.dataURI];
 }
 
 
 // ==========================================
-// 13. FILE ANALYSIS
+// 13. IMAGE AND PDF ANALYSIS
 // ==========================================
 
 async function analyzeFile(file, prompt = "") {
@@ -710,14 +867,20 @@ async function analyzeFile(file, prompt = "") {
 
     if (directText) return directText;
 
-    throw new Error("PaperOffice did not return a job ID.");
+    throw new Error(
+      "PaperOffice did not return a job ID."
+    );
   }
 
   const result = await pollPaperJob(jobId);
   const text = extractText(result);
 
   if (!text) {
-    throw new Error("No readable text was returned.");
+    console.error("PaperOffice analysis result:", result);
+
+    throw new Error(
+      "No readable text was returned."
+    );
   }
 
   return text;
@@ -725,7 +888,138 @@ async function analyzeFile(file, prompt = "") {
 
 
 // ==========================================
-// 14. FILE HANDLING
+// 14. NORMAL CHAT AND CODING
+// ==========================================
+
+function buildChatPrompt(prompt, mode) {
+  const instructions = mode === "coding"
+    ? `You are Veditalk Coding Mode.
+
+Help users generate, explain, debug, and rewrite code.
+
+Rules:
+- Provide complete code when requested.
+- Use fenced code blocks for code.
+- Explain important changes clearly.
+- Never pretend code has been executed or tested.
+- Ask for missing information when necessary.
+- Preserve the user's existing architecture when editing projects.`
+    : `You are Veditalk, a helpful general-purpose AI assistant.
+
+Answer clearly, accurately, and naturally.
+Use Markdown when it improves readability.
+Be honest about uncertainty and limitations.`;
+
+  const recentMessages = guestMessages
+    .filter(message => message.role !== "image")
+    .slice(-13);
+
+  const history = recentMessages.filter(
+    (message, index) => {
+      const isLast = index === recentMessages.length - 1;
+
+      return !(
+        isLast &&
+        message.role === "user" &&
+        message.content === prompt
+      );
+    }
+  );
+
+  return {
+    instructions,
+    history,
+    prompt
+  };
+}
+
+
+async function generateTextResponse(request, mode) {
+  if (!CONFIG.TEXT_API_ENDPOINT.trim()) {
+    throw new Error(
+      "The AI endpoint has not been configured."
+    );
+  }
+
+  const messages = [
+    {
+      role: "system",
+      content: request.instructions
+    },
+
+    ...request.history.map(message => ({
+      role: message.role,
+      content: message.content
+    })),
+
+    {
+      role: "user",
+      content: request.prompt
+    }
+  ];
+
+  const headers = {
+    "Content-Type": "application/json"
+  };
+
+  if (CONFIG.TEXT_API_KEY.trim()) {
+    headers.Authorization =
+      `Bearer ${CONFIG.TEXT_API_KEY.trim()}`;
+  }
+
+  const response = await fetch(
+    CONFIG.TEXT_API_ENDPOINT,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        messages,
+        mode
+      })
+    }
+  );
+
+  const result = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(
+      result.error ||
+      result.message ||
+      `AI request failed: HTTP ${response.status}`
+    );
+  }
+
+  const answer =
+    result.response ??
+    result.result?.response ??
+    result.output ??
+    result.content ??
+    result.choices?.[0]?.message?.content;
+
+  if (
+    typeof answer !== "string" ||
+    !answer.trim()
+  ) {
+    console.error("Raw Cloudflare AI response:", result);
+
+    throw new Error(
+      "The AI returned an unexpected response format."
+    );
+  }
+
+  return answer.trim();
+}
+
+
+async function handleTextMode(prompt, mode) {
+  const request = buildChatPrompt(prompt, mode);
+
+  return generateTextResponse(request, mode);
+}
+
+
+// ==========================================
+// 15. FILE HANDLING
 // ==========================================
 
 function validateFile(file) {
@@ -746,7 +1040,10 @@ function validateFile(file) {
   ];
 
   if (!allowedTypes.includes(file.type)) {
-    showToast("Unsupported file type. Select an image or PDF.");
+    showToast(
+      "Unsupported file type. Select an image or PDF."
+    );
+
     return false;
   }
 
@@ -759,26 +1056,102 @@ function selectFile(file) {
 
   selectedFile = file;
 
-  filePreview.classList.remove("hidden");
+  filePreview?.classList.remove("hidden");
 
-  $("fileName").textContent = file.name;
+  const fileName = $("fileName");
+
+  if (fileName) {
+    fileName.textContent = file.name;
+  }
 }
 
 
 function removeSelectedFile() {
   selectedFile = null;
 
-  fileInput.value = "";
+  if (fileInput) {
+    fileInput.value = "";
+  }
 
-  filePreview.classList.add("hidden");
+  filePreview?.classList.add("hidden");
 }
 
 
 // ==========================================
-// 15. MODE SWITCHING
+// 16. MODE SWITCHING
 // ==========================================
 
+const MODE_SETTINGS = {
+  chat: {
+    hint: "Ask Veditalk anything.",
+    placeholder: "Message Veditalk...",
+    button: "Send "
+  },
+
+  coding: {
+    hint: "Generate, explain, debug, or rewrite code.",
+    placeholder: "Describe what you want to code...",
+    button: "Run "
+  },
+
+  generate: {
+    hint: "Describe your image in a prompt.",
+    placeholder: "Describe the image you want to create...",
+    button: "Generate "
+  },
+
+  analyze: {
+    hint: "Attach an image or PDF to analyze.",
+    placeholder: "Ask something about your file...",
+    button: "Analyze "
+  }
+};
+
+
 function setMode(mode) {
+  if (!MODE_SETTINGS[mode]) return;
+  if (mode === currentMode) return;
+  if (isProcessing) return;
+
+  const hasMessages =
+    messagesContainer &&
+    messagesContainer.children.length > 0;
+
+  if (hasMessages) {
+    pendingMode = mode;
+
+    const currentName =
+      document.querySelector(".mode-button.active")
+        ?.textContent.trim() || currentMode;
+
+    const nextName =
+      document.querySelector(
+        `[data-mode="${mode}"]`
+      )?.textContent.trim() || mode;
+
+    const switchMessage = $("modeSwitchMessage");
+    const switchModal = $("modeSwitchModal");
+
+    if (switchMessage && switchModal) {
+      switchMessage.textContent =
+        `Changing from ${currentName} to ${nextName} will reset the chat. Your signed-in messages have already been saved to history.`;
+
+      switchModal.classList.remove("hidden");
+    } else {
+      applyMode(mode);
+      startNewConversation();
+    }
+
+    return;
+  }
+
+  applyMode(mode);
+}
+
+
+function applyMode(mode) {
+  if (!MODE_SETTINGS[mode]) return;
+
   currentMode = mode;
 
   document.querySelectorAll(".mode-button").forEach(button => {
@@ -788,55 +1161,126 @@ function setMode(mode) {
     );
   });
 
-  $("modeHint").textContent =
-    mode === "generate"
-      ? "Describe your image in a prompt."
-      : "Attach an image or PDF to analyze.";
+  const settings = MODE_SETTINGS[mode];
 
-  promptInput.placeholder =
-    mode === "generate"
-      ? "Describe the image you want to create..."
-      : "Ask something about your file...";
+  const modeHint = $("modeHint");
 
-  const buttonText = sendButton.firstChild;
+  if (modeHint) {
+    modeHint.textContent = settings.hint;
+  }
 
-  if (buttonText?.nodeType === Node.TEXT_NODE) {
-    buttonText.textContent =
-      mode === "generate" ? "Generate " : "Analyze ";
+  if (promptInput) {
+    promptInput.placeholder = settings.placeholder;
+  }
+
+  if (
+    sendButton?.firstChild?.nodeType === Node.TEXT_NODE
+  ) {
+    sendButton.firstChild.textContent = settings.button;
+  }
+
+  if (attachButton) {
+    attachButton.disabled = mode !== "analyze";
+  }
+
+  if (mode !== "analyze" && selectedFile) {
+    removeSelectedFile();
   }
 }
 
 
+$("cancelModeSwitch")?.addEventListener("click", () => {
+  pendingMode = null;
+
+  $("modeSwitchModal")?.classList.add("hidden");
+});
+
+
+$("confirmModeSwitch")?.addEventListener(
+  "click",
+  () => {
+    if (!pendingMode || isProcessing) return;
+
+    const nextMode = pendingMode;
+
+    clearMessages();
+
+    guestMessages = [];
+    currentConversationId = null;
+
+    removeSelectedFile();
+
+    applyMode(nextMode);
+
+    $("modeSwitchModal")?.classList.add("hidden");
+
+    pendingMode = null;
+  }
+);
+
+
 // ==========================================
-// 16. SEND REQUEST
+// 17. REQUEST HANDLING
 // ==========================================
 
 async function sendRequest() {
   if (isProcessing) return;
 
-  const prompt = promptInput.value.trim();
+  const prompt = promptInput?.value.trim() || "";
+  const file = selectedFile;
 
-  if (!prompt && !selectedFile) {
-    showToast("Write a prompt or attach a file first.");
+  if (!prompt && !file) {
+    showToast(
+      "Write a message or attach a file first."
+    );
+
     return;
   }
 
-  if (currentMode === "analyze" && !selectedFile) {
-    showToast("Attach an image or PDF first.");
+  if (currentMode === "analyze" && !file) {
+    showToast(
+      "Attach an image or PDF first."
+    );
+
     return;
   }
 
-  if (currentMode === "generate" && selectedFile) {
-    showToast("Switch to Analyze mode to use your attachment.");
+  if (currentMode === "generate" && file) {
+    showToast(
+      "Remove the attachment to generate an image."
+    );
+
+    return;
+  }
+
+  if (
+    ["chat", "coding"].includes(currentMode) &&
+    file
+  ) {
+    showToast(
+      "File uploads are currently supported in Read Image / PDF mode."
+    );
+
+    return;
+  }
+
+  if (
+    currentMode === "generate" &&
+    !prompt
+  ) {
+    showToast(
+      "Describe the image you want to generate."
+    );
+
     return;
   }
 
   setProcessing(true);
 
-  const file = selectedFile;
+  const modeAtStart = currentMode;
 
   const userText = prompt ||
-    (file ? `Analyze file: ${file.name}` : "");
+    `Analyze file: ${file.name}`;
 
   const attachments = file
     ? [{
@@ -849,49 +1293,139 @@ async function sendRequest() {
   addMessage("user", userText);
 
   try {
-    await saveMessage("user", userText, attachments);
+    await saveMessage(
+      "user",
+      userText,
+      attachments
+    );
   } catch (error) {
-    console.error("Message saving error:", error);
-    showToast("Your message could not be saved to history.");
+    console.error("User message saving error:", error);
+
+    showToast(
+      "Message sent, but it could not be saved to history."
+    );
   }
 
-  promptInput.value = "";
+  if (promptInput) {
+    promptInput.value = "";
+  }
+
   removeSelectedFile();
 
   let loadingMessage = null;
 
   try {
-    if (currentMode === "generate") {
-      loadingMessage = addMessage("assistant", "Creating your image...");
+    // NORMAL CHAT
+    if (modeAtStart === "chat") {
+      loadingMessage = addMessage(
+        "assistant",
+        "Thinking..."
+      );
 
-      const images = await generateImage(prompt);
+      const result = await handleTextMode(
+        prompt,
+        "chat"
+      );
 
-      loadingMessage.remove();
-
-      for (const url of images) {
-        addImageMessage(url);
-
-        try {
-          await saveMessage("image", url);
-        } catch (error) {
-          console.error("Image history saving error:", error);
-        }
-      }
-    } else {
-      loadingMessage = addMessage("assistant", "Reading your file...");
-
-      const result = await analyzeFile(file, prompt);
-
-      loadingMessage.remove();
+      loadingMessage?.remove();
+      loadingMessage = null;
 
       addMessage("assistant", result);
 
       try {
         await saveMessage("assistant", result);
       } catch (error) {
-        console.error("OCR history saving error:", error);
+        console.error("Assistant saving error:", error);
+        showToast("Reply received, but history could not be updated.");
       }
     }
+
+    // CODING MODE
+    else if (modeAtStart === "coding") {
+      loadingMessage = addMessage(
+        "assistant",
+        "Working on your code..."
+      );
+
+      const result = await handleTextMode(
+        prompt,
+        "coding"
+      );
+
+      loadingMessage?.remove();
+      loadingMessage = null;
+
+      addMessage("assistant", result);
+
+      try {
+        await saveMessage("assistant", result);
+      } catch (error) {
+        console.error("Assistant saving error:", error);
+        showToast("Reply received, but history could not be updated.");
+      }
+    }
+
+    // IMAGE GENERATION
+    else if (modeAtStart === "generate") {
+      loadingMessage = addMessage(
+        "assistant",
+        "Creating your image..."
+      );
+
+      const images = await generateImage(prompt);
+
+      loadingMessage?.remove();
+      loadingMessage = null;
+
+      for (const url of images) {
+  addImageMessage(url);
+
+  if (!currentUser) {
+    continue;
+  }
+
+  try {
+    const fileId = await uploadGeneratedImage(url);
+
+    await saveMessage(
+      "image",
+      JSON.stringify({
+        type: "appwrite-image",
+        fileId
+      })
+    );
+  } catch (error) {
+    console.error("Image storage error:", error);
+    showToast("Image generated, but could not be saved to history.");
+  }
+}
+    }
+
+    // IMAGE AND PDF ANALYSIS
+    else if (modeAtStart === "analyze") {
+      loadingMessage = addMessage(
+        "assistant",
+        "Reading your file..."
+      );
+
+      const result = await analyzeFile(
+        file,
+        prompt
+      );
+
+      loadingMessage?.remove();
+      loadingMessage = null;
+
+      addMessage("assistant", result);
+
+      try {
+        await saveMessage("assistant", result);
+      } catch (error) {
+        console.error("Analysis saving error:", error);
+        showToast("Analysis completed, but history could not be updated.");
+      }
+    }
+
   } catch (error) {
     console.error("Request error:", error);
 
@@ -908,59 +1442,82 @@ async function sendRequest() {
 
 
 // ==========================================
-// 17. AUTHENTICATION INTERFACE
+// 18. AUTHENTICATION INTERFACE
 // ==========================================
 
 function showAuth() {
-  authOverlay.classList.remove("hidden");
+  authOverlay?.classList.remove("hidden");
+
   showAuthChoices();
 }
 
 
 function hideAuth() {
-  authOverlay.classList.add("hidden");
+  authOverlay?.classList.add("hidden");
 }
 
 
 function showAuthChoices() {
-  authChoice.classList.remove("hidden");
-  authForm.classList.add("hidden");
+  authChoice?.classList.remove("hidden");
+  authForm?.classList.add("hidden");
 
-  $("authMessage").textContent = "";
+  const message = $("authMessage");
+
+  if (message) {
+    message.textContent = "";
+  }
 }
 
 
 function showAuthForm(mode) {
+  if (!authChoice || !authForm) return;
+
   authChoice.classList.add("hidden");
   authForm.classList.remove("hidden");
 
   const isRegister = mode === "register";
   const isOtp = mode === "otp";
 
-  $("nameLabel").classList.toggle("hidden", !isRegister);
-  $("authName").classList.toggle("hidden", !isRegister);
+  $("nameLabel")?.classList.toggle("hidden", !isRegister);
+  $("authName")?.classList.toggle("hidden", !isRegister);
 
-  $("passwordGroup").classList.toggle("hidden", isOtp);
-  $("otpGroup").classList.toggle("hidden", !isOtp);
+  $("passwordGroup")?.classList.toggle("hidden", isOtp);
+  $("otpGroup")?.classList.toggle("hidden", !isOtp);
 
-  $("authSubmit").classList.toggle("hidden", isOtp);
-  $("otpSendButton").classList.toggle("hidden", isOtp);
+  $("authSubmit")?.classList.toggle("hidden", isOtp);
+  $("otpSendButton")?.classList.toggle("hidden", isOtp);
 
-  $("authName").required = isRegister;
-  $("authPassword").required = !isOtp;
-  $("authOtp").required = isOtp;
+  if ($("authName")) {
+    $("authName").required = isRegister;
+  }
 
-  $("authSubmit").textContent =
-    isRegister ? "Create account" : "Log in";
+  if ($("authPassword")) {
+    $("authPassword").required = !isOtp;
+  }
 
-  $("authMessage").textContent = "";
+  if ($("authOtp")) {
+    $("authOtp").required = isOtp;
+  }
+
+  const submitButton = $("authSubmit");
+
+  if (submitButton) {
+    submitButton.textContent =
+      isRegister ? "Create account" : "Log in";
+  }
+
+  const message = $("authMessage");
+
+  if (message) {
+    message.textContent = "";
+  }
 
   authForm.dataset.mode = mode;
 }
 
 
 // ==========================================
-// 18. AUTHENTICATION ACTIONS
+// 19. AUTHENTICATION ACTIONS
 // ==========================================
 
 async function registerUser(name, email, password) {
@@ -1000,13 +1557,17 @@ async function sendEmailCode(email) {
 
   showAuthForm("otp");
 
-  showToast("Check your email for the verification code.");
+  showToast(
+    "Check your email for the verification code."
+  );
 }
 
 
 async function verifyEmailCode(code) {
   if (!pendingOtpUserId) {
-    throw new Error("Request an email code first.");
+    throw new Error(
+      "Request an email code first."
+    );
   }
 
   await account.createSession({
@@ -1026,20 +1587,34 @@ async function refreshUser() {
   try {
     currentUser = await account.get();
 
-    accountStatus.textContent =
-      currentUser.name || currentUser.email;
+    if (accountStatus) {
+      accountStatus.textContent =
+        currentUser.name || currentUser.email;
+    }
 
-    accountButton.textContent = "Account";
-    historyButton.classList.remove("hidden");
+    if (accountButton) {
+      accountButton.textContent = "Account";
+    }
+
+    historyButton?.classList.remove("hidden");
 
     hideAuth();
-  } catch {
+  } catch (error) {
     currentUser = null;
 
-    accountStatus.textContent = "Guest mode";
-    accountButton.textContent = "Log in";
+    if (accountStatus) {
+      accountStatus.textContent = "Guest mode";
+    }
 
-    historyButton.classList.add("hidden");
+    if (accountButton) {
+      accountButton.textContent = "Log in";
+    }
+
+    historyButton?.classList.add("hidden");
+
+    if (error?.code !== 401) {
+      console.error("Account check error:", error);
+    }
   }
 }
 
@@ -1056,15 +1631,22 @@ async function logoutUser() {
 
     clearMessages();
 
-    accountStatus.textContent = "Guest mode";
-    accountButton.textContent = "Log in";
+    if (accountStatus) {
+      accountStatus.textContent = "Guest mode";
+    }
 
-    historyButton.classList.add("hidden");
-    historyPanel.classList.add("hidden");
+    if (accountButton) {
+      accountButton.textContent = "Log in";
+    }
+
+    historyButton?.classList.add("hidden");
+    historyPanel?.classList.add("hidden");
 
     showAuth();
 
-    showToast("You are now using guest mode.");
+    showToast(
+      "You are now using guest mode."
+    );
   } catch (error) {
     showToast(getErrorMessage(error));
   }
@@ -1072,93 +1654,137 @@ async function logoutUser() {
 
 
 // ==========================================
-// 19. AUTHENTICATION FORM
+// 20. AUTHENTICATION FORM
 // ==========================================
 
 async function submitAuthForm(event) {
   event.preventDefault();
 
-  const mode = authForm.dataset.mode;
+  const mode = authForm?.dataset.mode;
 
-  const name = $("authName").value.trim();
-  const email = $("authEmail").value.trim();
-  const password = $("authPassword").value;
-  const code = $("authOtp").value.trim();
+  const name = $("authName")?.value.trim() || "";
+  const email = $("authEmail")?.value.trim() || "";
+  const password = $("authPassword")?.value || "";
+  const code = $("authOtp")?.value.trim() || "";
 
   const message = $("authMessage");
   const submitButton = $("authSubmit");
+  const otpButton = $("otpSendButton");
 
-  message.textContent = "Please wait...";
+  if (message) {
+    message.textContent = "Please wait...";
+  }
 
-  submitButton.disabled = true;
-  $("otpSendButton").disabled = true;
+  if (submitButton) {
+    submitButton.disabled = true;
+  }
+
+  if (otpButton) {
+    otpButton.disabled = true;
+  }
 
   try {
     if (mode === "register") {
       if (!name || !email || !password) {
-        throw new Error("Complete all the fields.");
+        throw new Error(
+          "Complete all the fields."
+        );
       }
 
       if (password.length < 8) {
-        throw new Error("Password must contain at least 8 characters.");
+        throw new Error(
+          "Password must contain at least 8 characters."
+        );
       }
 
-      await registerUser(name, email, password);
+      await registerUser(
+        name,
+        email,
+        password
+      );
     }
 
-    if (mode === "login") {
+    else if (mode === "login") {
       if (!email || !password) {
-        throw new Error("Enter your email and password.");
+        throw new Error(
+          "Enter your email and password."
+        );
       }
 
       await loginUser(email, password);
     }
 
-    if (mode === "otp") {
+    else if (mode === "otp") {
       if (!code) {
-        throw new Error("Enter the email verification code.");
+        throw new Error(
+          "Enter the email verification code."
+        );
       }
 
       await verifyEmailCode(code);
     }
+
   } catch (error) {
-    message.textContent = getErrorMessage(error);
+    if (message) {
+      message.textContent = getErrorMessage(error);
+    }
   } finally {
-    submitButton.disabled = false;
-    $("otpSendButton").disabled = false;
+    if (submitButton) {
+      submitButton.disabled = false;
+    }
+
+    if (otpButton) {
+      otpButton.disabled = false;
+    }
   }
 }
 
 
 // ==========================================
-// 20. THEME
+// 21. THEME
 // ==========================================
 
 function loadTheme() {
-  const savedTheme = localStorage.getItem("veditalk-theme");
+  let savedTheme = "dark";
+
+  try {
+    savedTheme =
+      localStorage.getItem("veditalk-theme") || "dark";
+  } catch (error) {
+    console.warn("Theme preference could not be loaded.");
+  }
 
   const isLight = savedTheme === "light";
 
   document.body.classList.toggle("light", isLight);
 
-  themeButton.textContent = isLight ? "☀" : "☼";
+  if (themeButton) {
+    themeButton.textContent = isLight ? "☀" : "☼";
+  }
 }
 
 
 function toggleTheme() {
-  const isLight = document.body.classList.toggle("light");
+  const isLight =
+    document.body.classList.toggle("light");
 
-  localStorage.setItem(
-    "veditalk-theme",
-    isLight ? "light" : "dark"
-  );
+  try {
+    localStorage.setItem(
+      "veditalk-theme",
+      isLight ? "light" : "dark"
+    );
+  } catch (error) {
+    console.warn("Theme preference could not be saved.");
+  }
 
-  themeButton.textContent = isLight ? "☀" : "☼";
+  if (themeButton) {
+    themeButton.textContent = isLight ? "☀" : "☼";
+  }
 }
 
 
 // ==========================================
-// 21. EVENT LISTENERS
+// 22. EVENT LISTENERS
 // ==========================================
 
 // Mode buttons
@@ -1170,12 +1796,19 @@ document.querySelectorAll(".mode-button").forEach(button => {
 });
 
 
-// Send
+// Send message
 
-sendButton.addEventListener("click", sendRequest);
+sendButton?.addEventListener(
+  "click",
+  sendRequest
+);
 
-promptInput.addEventListener("keydown", event => {
-  if (event.key === "Enter" && !event.shiftKey) {
+
+promptInput?.addEventListener("keydown", event => {
+  if (
+    event.key === "Enter" &&
+    !event.shiftKey
+  ) {
     event.preventDefault();
     sendRequest();
   }
@@ -1184,12 +1817,21 @@ promptInput.addEventListener("keydown", event => {
 
 // Attach file
 
-attachButton.addEventListener("click", () => {
-  fileInput.click();
+attachButton?.addEventListener("click", () => {
+  if (currentMode !== "analyze") {
+    showToast(
+      "Switch to Read Image / PDF mode to attach a file."
+    );
+
+    return;
+  }
+
+  fileInput?.click();
 });
 
-fileInput.addEventListener("change", event => {
-  const file = event.target.files[0];
+
+fileInput?.addEventListener("change", event => {
+  const file = event.target.files?.[0];
 
   if (file) {
     selectFile(file);
@@ -1199,7 +1841,7 @@ fileInput.addEventListener("change", event => {
 
 // Remove file
 
-$("removeFileButton").addEventListener(
+$("removeFileButton")?.addEventListener(
   "click",
   removeSelectedFile
 );
@@ -1207,12 +1849,15 @@ $("removeFileButton").addEventListener(
 
 // Theme
 
-themeButton.addEventListener("click", toggleTheme);
+themeButton?.addEventListener(
+  "click",
+  toggleTheme
+);
 
 
 // Account button
 
-accountButton.addEventListener("click", () => {
+accountButton?.addEventListener("click", () => {
   if (currentUser) {
     const shouldLogout = confirm(
       `Logged in as ${currentUser.email}.\n\nLog out?`
@@ -1229,13 +1874,18 @@ accountButton.addEventListener("click", () => {
 
 // Guest mode
 
-$("guestButton").addEventListener("click", () => {
+$("guestButton")?.addEventListener("click", () => {
   currentUser = null;
 
-  accountStatus.textContent = "Guest mode";
-  accountButton.textContent = "Log in";
+  if (accountStatus) {
+    accountStatus.textContent = "Guest mode";
+  }
 
-  historyButton.classList.add("hidden");
+  if (accountButton) {
+    accountButton.textContent = "Log in";
+  }
+
+  historyButton?.classList.add("hidden");
 
   hideAuth();
 });
@@ -1243,55 +1893,69 @@ $("guestButton").addEventListener("click", () => {
 
 // Login
 
-$("showLoginButton").addEventListener("click", () => {
+$("showLoginButton")?.addEventListener("click", () => {
   showAuthForm("login");
 });
 
 
 // Registration
 
-$("showSignupButton").addEventListener("click", () => {
+$("showSignupButton")?.addEventListener("click", () => {
   showAuthForm("register");
 });
 
 
 // Back
 
-$("authBackButton").addEventListener("click", () => {
+$("authBackButton")?.addEventListener("click", () => {
   showAuthChoices();
 });
 
 
-// Submit login / registration / OTP
+// Authentication form
 
-authForm.addEventListener("submit", submitAuthForm);
+authForm?.addEventListener(
+  "submit",
+  submitAuthForm
+);
 
 
 // Request OTP
 
-$("otpSendButton").addEventListener("click", async () => {
-  const email = $("authEmail").value.trim();
+$("otpSendButton")?.addEventListener(
+  "click",
+  async () => {
+    const email = $("authEmail")?.value.trim() || "";
 
-  if (!email) {
-    showToast("Enter your email address first.");
-    return;
+    if (!email) {
+      showToast("Enter your email address first.");
+      return;
+    }
+
+    const button = $("otpSendButton");
+
+    button.disabled = true;
+
+    try {
+      await sendEmailCode(email);
+    } catch (error) {
+      const message = $("authMessage");
+
+      if (message) {
+        message.textContent = getErrorMessage(error);
+      }
+    } finally {
+      button.disabled = false;
+    }
   }
-
-  try {
-    $("otpSendButton").disabled = true;
-
-    await sendEmailCode(email);
-  } catch (error) {
-    $("authMessage").textContent = getErrorMessage(error);
-  } finally {
-    $("otpSendButton").disabled = false;
-  }
-});
+);
 
 
 // History
 
-historyButton.addEventListener("click", () => {
+historyButton?.addEventListener("click", () => {
+  if (!historyPanel) return;
+
   if (historyPanel.classList.contains("hidden")) {
     loadHistory();
   } else {
@@ -1302,14 +1966,20 @@ historyButton.addEventListener("click", () => {
 
 // New conversation
 
-$("newChatButton").addEventListener("click", startNewConversation);
+$("newChatButton")?.addEventListener(
+  "click",
+  startNewConversation
+);
 
 
 // Close history
 
-$("closeHistoryButton").addEventListener("click", () => {
-  historyPanel.classList.add("hidden");
-});
+$("closeHistoryButton")?.addEventListener(
+  "click",
+  () => {
+    historyPanel?.classList.add("hidden");
+  }
+);
 
 
 // Close history when clicking outside
@@ -1317,6 +1987,7 @@ $("closeHistoryButton").addEventListener("click", () => {
 document.addEventListener("click", event => {
   if (
     historyPanel &&
+    historyButton &&
     !historyPanel.classList.contains("hidden") &&
     !historyPanel.contains(event.target) &&
     !historyButton.contains(event.target)
@@ -1327,21 +1998,28 @@ document.addEventListener("click", event => {
 
 
 // ==========================================
-// 22. STARTUP
+// 23. STARTUP
 // ==========================================
 
 async function initializeVeditalk() {
   loadTheme();
 
-  setMode("generate");
+  applyMode("chat");
 
   setProcessing(false);
 
   const initialized = initializeAppwrite();
 
   if (!initialized) {
-    accountStatus.textContent = "Guest mode";
-    accountButton.textContent = "Log in";
+    if (accountStatus) {
+      accountStatus.textContent = "Guest mode";
+    }
+
+    if (accountButton) {
+      accountButton.textContent = "Log in";
+    }
+
+    showAuth();
 
     return;
   }
@@ -1349,9 +2027,15 @@ async function initializeVeditalk() {
   await refreshUser();
 
   if (!currentUser) {
-    accountStatus.textContent = "Guest mode";
-    accountButton.textContent = "Log in";
+    if (accountStatus) {
+      accountStatus.textContent = "Guest mode";
+    }
+
+    if (accountButton) {
+      accountButton.textContent = "Log in";
+    }
   }
 }
+
 
 initializeVeditalk();
