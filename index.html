@@ -5,200 +5,489 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#10111a">
+
+  <meta
+    name="description"
+    content="Veditalk is your AI workspace for chatting, coding, image generation, and document analysis."
+  >
+
   <title>Veditalk | AI Workspace</title>
+
   <link rel="stylesheet" href="style.css">
+
   <script src="https://cdn.jsdelivr.net/npm/appwrite@29.0.0"></script>
   <script src="script.js" defer></script>
+  <link
+  rel="stylesheet"
+  href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css"
+  >
 </head>
+
 <body>
   <div class="app">
+
+    <!-- HEADER -->
     <header class="topbar">
+
       <a class="brand" href="#">
         <span class="brand-icon">V</span>
         <span>Veditalk</span>
       </a>
 
       <div class="header-right">
+
         <span class="connection-status">
           <span class="status-dot"></span>
           PaperOffice
         </span>
+
         <span id="accountStatus">Guest mode</span>
-        <button id="historyButton" class="header-button hidden">History</button>
-        <button id="accountButton" class="header-button">Log in</button>
-        <button id="themeButton" class="icon-button" title="Toggle theme">☼</button>
+
+        <button
+          id="historyButton"
+          class="header-button hidden"
+          type="button"
+        >
+          History
+        </button>
+
+        <button
+          id="accountButton"
+          class="header-button"
+          type="button"
+        >
+          Log in
+        </button>
+
+        <button
+          id="themeButton"
+          class="icon-button"
+          type="button"
+          title="Toggle theme"
+          aria-label="Toggle theme"
+        >
+          ☼
+        </button>
+
       </div>
     </header>
 
+
+    <!-- MAIN CONTENT -->
     <main class="main">
+
+      <!-- WELCOME -->
       <section class="welcome" id="welcome">
+
         <div class="welcome-icon">✦</div>
-        <p class="eyebrow">YOUR CREATIVE AI WORKSPACE</p>
-        <h1>What are we creating?</h1>
-        <p class="welcome-description">
-          Generate images or extract text from images and PDFs.
+
+        <p class="eyebrow">
+          YOUR CREATIVE AI WORKSPACE
         </p>
+
+        <h1>What are we working on?</h1>
+
+        <p class="welcome-description">
+          Chat, code, generate images, or analyze documents.
+        </p>
+
       </section>
 
-      <section class="mode-switch">
-        <button class="mode-button active" data-mode="generate">
-          <span>✦</span> Generate image
+
+      <!-- MODE SWITCHER -->
+      <section class="mode-switch" aria-label="Workspace modes">
+
+        <button
+          class="mode-button active"
+          data-mode="chat"
+          type="button"
+        >
+          <span>💬</span>
+          Normal Chat
         </button>
-        <button class="mode-button" data-mode="analyze">
-          <span>▧</span> Read image / PDF
+
+        <button
+          class="mode-button"
+          data-mode="coding"
+          type="button"
+        >
+          <span>💻</span>
+          Coding Mode
         </button>
+
+        <button
+          class="mode-button"
+          data-mode="generate"
+          type="button"
+        >
+          <span>✦</span>
+          Generate Image
+        </button>
+
+        <button
+          class="mode-button"
+          data-mode="analyze"
+          type="button"
+        >
+          <span>▧</span>
+          Read Image / PDF
+        </button>
+
       </section>
 
-      <section id="messages" class="messages" aria-live="polite"></section>
 
+      <!-- MESSAGES -->
+      <section
+        id="messages"
+        class="messages"
+        aria-live="polite"
+        aria-label="Conversation"
+      ></section>
+
+
+      <!-- COMPOSER -->
       <section class="composer-section">
+
+        <!-- FILE PREVIEW -->
         <div id="filePreview" class="file-preview hidden">
+
           <span id="fileName"></span>
-          <button id="removeFileButton" class="remove-file">×</button>
+
+          <button
+            id="removeFileButton"
+            class="remove-file"
+            type="button"
+            aria-label="Remove attached file"
+          >
+            ×
+          </button>
+
         </div>
 
+
+        <!-- MESSAGE INPUT -->
         <div class="composer">
+
           <textarea
             id="promptInput"
             rows="2"
             maxlength="2000"
-            placeholder="Describe the image you want to create..."
+            placeholder="Message Veditalk..."
+            aria-label="Message Veditalk"
           ></textarea>
 
+
+          <!-- COMPOSER FOOTER -->
           <div class="composer-bottom">
+
             <div class="composer-tools">
-              <button id="attachButton" class="tool-button">
+
+              <button
+                id="attachButton"
+                class="tool-button"
+                type="button"
+              >
                 ＋ Attach file
               </button>
-              <span id="modeHint">Describe your image in a prompt.</span>
+
+              <span id="modeHint">
+                Ask Veditalk anything.
+              </span>
+
             </div>
 
-            <button id="sendButton" class="send-button">
-              Generate <span>↑</span>
+
+            <button
+              id="sendButton"
+              class="send-button"
+              type="button"
+            >
+              Send <span>↑</span>
             </button>
+
           </div>
 
+
+          <!-- FILE INPUT -->
           <input
             id="fileInput"
             type="file"
             accept="image/png,image/jpeg,image/webp,image/tiff,image/bmp,application/pdf,.pdf"
             hidden
           >
+
         </div>
 
+
+        <!-- DISCLAIMER -->
         <p class="disclaimer">
-          AI-generated results may contain mistakes. Don't upload private or sensitive documents.
+          AI-generated results may contain mistakes.
+          Don't upload private or sensitive documents.
         </p>
+
       </section>
+
     </main>
 
+
+    <!-- FOOTER -->
     <footer class="footer">
+
       <span>Veditalk</span>
+
       <span>Powered by PaperOffice AI</span>
+
     </footer>
+
   </div>
 
-  <!-- AUTHENTICATION -->
+
+
+  <!-- AUTHENTICATION OVERLAY -->
   <div id="authOverlay" class="overlay">
+
     <section class="auth-card">
+
       <div class="auth-brand">
+
         <span class="brand-icon">V</span>
+
         <span>Veditalk</span>
+
       </div>
 
-      <h2 id="authTitle">Welcome to Veditalk</h2>
+
+      <h2 id="authTitle">
+        Welcome to Veditalk
+      </h2>
+
+
       <p id="authDescription">
         Use Veditalk immediately or sign in to save your conversations.
       </p>
 
+
+      <!-- AUTH OPTIONS -->
       <div id="authChoice" class="auth-choice">
-        <button id="guestButton" class="primary-button">
+
+        <button
+          id="guestButton"
+          class="primary-button"
+          type="button"
+        >
           Continue as Guest
         </button>
 
-        <button id="showLoginButton" class="secondary-button">
+
+        <button
+          id="showLoginButton"
+          class="secondary-button"
+          type="button"
+        >
           Log in
         </button>
 
-        <button id="showSignupButton" class="secondary-button">
+
+        <button
+          id="showSignupButton"
+          class="secondary-button"
+          type="button"
+        >
           Create account
         </button>
+
       </div>
 
+
+      <!-- AUTH FORM -->
       <form id="authForm" class="auth-form hidden">
-        <label id="nameLabel" class="hidden" for="authName">Name</label>
+
+        <label
+          id="nameLabel"
+          class="hidden"
+          for="authName"
+        >
+          Name
+        </label>
+
         <input
           id="authName"
           class="auth-input hidden"
           type="text"
           placeholder="Your name"
+          autocomplete="name"
         >
 
-        <label for="authEmail">Email</label>
+
+        <label for="authEmail">
+          Email
+        </label>
+
         <input
           id="authEmail"
           class="auth-input"
           type="email"
           placeholder="you@example.com"
+          autocomplete="email"
           required
         >
 
+
+        <!-- PASSWORD -->
         <div id="passwordGroup">
-          <label for="authPassword">Password</label>
+
+          <label for="authPassword">
+            Password
+          </label>
+
           <input
             id="authPassword"
             class="auth-input"
             type="password"
             minlength="8"
             placeholder="At least 8 characters"
+            autocomplete="current-password"
           >
+
         </div>
 
+
+        <!-- EMAIL OTP -->
         <div id="otpGroup" class="hidden">
-          <label for="authOtp">Email code</label>
+
+          <label for="authOtp">
+            Email code
+          </label>
+
           <input
             id="authOtp"
             class="auth-input"
             type="text"
             placeholder="Enter your email code"
+            autocomplete="one-time-code"
           >
+
         </div>
 
-        <button id="authSubmit" class="primary-button" type="submit">
+
+        <!-- SUBMIT -->
+        <button
+          id="authSubmit"
+          class="primary-button"
+          type="submit"
+        >
           Continue
         </button>
 
-        <button id="otpSendButton" class="secondary-button hidden" type="button">
+
+        <!-- SEND OTP -->
+        <button
+          id="otpSendButton"
+          class="secondary-button hidden"
+          type="button"
+        >
           Send email code
         </button>
 
-        <button id="authBackButton" class="text-button" type="button">
+
+        <!-- BACK -->
+        <button
+          id="authBackButton"
+          class="text-button"
+          type="button"
+        >
           Back
         </button>
+
       </form>
 
-      <p id="authMessage" class="auth-message"></p>
+
+      <!-- AUTH FEEDBACK -->
+      <p
+        id="authMessage"
+        class="auth-message"
+        aria-live="polite"
+      ></p>
+
 
       <p class="auth-footnote">
-        Guest conversations are temporary. Sign in to save conversations.
+        Guest conversations are temporary.
+        Sign in to save conversations.
       </p>
+
     </section>
+
   </div>
 
-  <!-- CONVERSATION HISTORY -->
-  <aside id="historyPanel" class="history-panel hidden">
+
+
+  <!-- CONVERSATION HISTORY PANEL -->
+  <aside
+    id="historyPanel"
+    class="history-panel hidden"
+    aria-label="Conversation history"
+  >
+
     <div class="history-heading">
+
       <strong>Saved conversations</strong>
-      <button id="closeHistoryButton" class="icon-button">×</button>
+
+      <button
+        id="closeHistoryButton"
+        class="icon-button"
+        type="button"
+        aria-label="Close history"
+      >
+        ×
+      </button>
+
     </div>
 
-    <button id="newChatButton" class="primary-button">
+
+    <button
+      id="newChatButton"
+      class="primary-button"
+      type="button"
+    >
       ＋ New conversation
     </button>
 
-    <div id="historyList" class="history-list"></div>
+
+    <div
+      id="historyList"
+      class="history-list"
+    ></div>
+
   </aside>
 
-  <div id="toast" class="toast"></div>
+
+
+  <!-- TOAST NOTIFICATIONS -->
+  <div
+    id="toast"
+    class="toast"
+    role="status"
+    aria-live="polite"
+  ></div>
+
+  <div id="modeSwitchModal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <h2>Switch mode?</h2>
+
+    <p id="modeSwitchMessage">
+      Changing modes will reset the current chat, but it will be saved to your history.
+    </p>
+
+    <p>Save your current conversation?</p>
+
+    <div class="modal-actions">
+      <button id="cancelModeSwitch">Cancel</button>
+      <button id="confirmModeSwitch">Save</button>
+    </div>
+  </div>
+</div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
 </body>
 </html>
